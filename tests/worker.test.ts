@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { loadConfig } from "../src/server/config";
 import type { Database } from "../src/server/db";
 import { processOneJob, retryDelayMs, startWorker } from "../src/server/worker";
@@ -17,7 +17,7 @@ test("backoff is exponential and bounded", () => {
 });
 
 // These tests exercise transactional control flow, not PostgreSQL's lock implementation.
-function scriptedDatabase(rows: unknown[][]) {
+function scriptedDatabase(rows: (unknown[] | (() => unknown[]))[]) {
   const writes: { table: unknown; values: Record<string, unknown> }[] = [];
   const locks: { table: unknown; options: unknown }[] = [];
   const tx = {
@@ -30,7 +30,8 @@ function scriptedDatabase(rows: unknown[][]) {
         limit() { return chain; },
         for(_mode: unknown, options?: unknown) {
           locks.push({ table, options });
-          return Promise.resolve(rows.shift() ?? []);
+          const next = rows.shift();
+          return Promise.resolve(typeof next === "function" ? next() : next ?? []);
         },
       };
       return chain;
@@ -71,14 +72,65 @@ test("manual revision is never overwritten or extracted", async () => {
 });
 
 test("stale fencing token prevents completion writes", async () => {
-  const { db, writes } = scriptedDatabase([
-    [{ ...job, attempts: 0 }], [receipt],
-    [{ ...job, state: "running", lockedBy: "new-owner", leaseExpiresAt: new Date(Date.now() + 1_000_000) }],
-  ]);
-  // Unsafe image filename fails before fetch, then attempts a fenced failure transaction.
-  expect(await processOneJob(db, enabledConfig)).toBe(true);
-  expect(writes).toHaveLength(2); // Claim updates only.
-  expect(writes[0]!.values.attempts).toBe(1);
-  expect(writes[0]!.values.lockedBy).toBeString();
-  expect((writes[0]!.values.leaseExpiresAt as Date).getTime() - Date.now()).toBeGreaterThan(enabledConfig.ai.timeoutMs);
+  const info = spyOn(console, "info").mockImplementation(() => {});
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const { db, writes } = scriptedDatabase([
+      [{ ...job, attempts: 0 }], [receipt],
+      [{ ...job, state: "running", lockedBy: "new-owner", leaseExpiresAt: new Date(Date.now() + 1_000_000) }],
+    ]);
+    // Unsafe image filename fails before fetch, then attempts a fenced failure transaction.
+    expect(await processOneJob(db, enabledConfig)).toBe(true);
+    expect(writes).toHaveLength(2); // Claim updates only.
+    expect(writes[0]!.values.attempts).toBe(1);
+    expect(writes[0]!.values.lockedBy).toBeString();
+    expect((writes[0]!.values.leaseExpiresAt as Date).getTime() - Date.now()).toBeGreaterThan(enabledConfig.ai.timeoutMs);
+    expect(info.mock.calls.map(([line]) => JSON.parse(line).event)).toEqual(["receipt.job.started"]);
+    expect(JSON.parse(warn.mock.calls[0]![0])).toMatchObject({ event: "receipt.job.skipped", reason: "stale_ownership", receiptId: receipt.id, jobId: job.id, attempt: 1 });
+  } finally {
+    info.mockRestore();
+    warn.mockRestore();
+  }
+});
+
+test("committed image failure logs a safe message and correlation metadata", async () => {
+  const info = spyOn(console, "info").mockImplementation(() => {});
+  const error = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const scripted = scriptedDatabase([
+      [{ ...job, attempts: 0 }], [receipt],
+      () => [{ ...job, attempts: 1, state: "running", lockedBy: scripted.writes[0]!.values.lockedBy, leaseExpiresAt: new Date(Date.now() + 1_000_000) }],
+      [receipt],
+    ]);
+    expect(await processOneJob(scripted.db, enabledConfig)).toBe(true);
+    expect(JSON.parse(error.mock.calls[0]![0])).toMatchObject({
+      event: "receipt.job.failed", receiptId: receipt.id, jobId: job.id, attempt: 1,
+      message: "Receipt image could not be read. Check upload storage.",
+    });
+    expect(error.mock.calls[0]![0]).not.toContain(receipt.imagePath);
+    expect(info.mock.calls.map(([line]) => JSON.parse(line).event)).toEqual(["receipt.job.started"]);
+  } finally {
+    info.mockRestore();
+    error.mockRestore();
+  }
+});
+
+test("rejected completion transaction does not log a committed failure", async () => {
+  const info = spyOn(console, "info").mockImplementation(() => {});
+  const error = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const { db } = scriptedDatabase([[{ ...job, attempts: 0 }], [receipt]]);
+    const transaction = db.transaction.bind(db);
+    let calls = 0;
+    db.transaction = (async callback => {
+      if (++calls === 2) throw new Error("private database diagnostics");
+      return transaction(callback);
+    }) as Database["transaction"];
+    await expect(processOneJob(db, enabledConfig)).rejects.toThrow("private database diagnostics");
+    expect(error).not.toHaveBeenCalled();
+    expect(info.mock.calls.map(([line]) => JSON.parse(line).event)).toEqual(["receipt.job.started"]);
+  } finally {
+    info.mockRestore();
+    error.mockRestore();
+  }
 });

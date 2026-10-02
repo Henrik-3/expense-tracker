@@ -202,6 +202,44 @@ the initial end-to-end verification. A live provider test and Docker image
 build/run still need validation in an environment with configured credentials
 and a running Docker Engine.
 
+## AI diagnostics and OpenRouter
+
+For OpenRouter, set `AI_API_BASE_URL=https://openrouter.ai/api/v1` and set
+`AI_MODEL` to its full model identifier. The model must support image input and
+the selected response format. `json_object` changes the provider request format;
+it does not turn off application-side validation or repair malformed output.
+
+The **backend terminal** (`bun start` or `bun run dev`, not Vite's terminal)
+prints JSON log lines automatically. In Docker, use `docker compose logs -f app`.
+Restart the backend after changing environment configuration, then use **Retry
+extraction** on the failed, unedited receipt to generate a new attempt.
+
+Follow a receipt's `receiptId`/`jobId` and each AI call's `requestId`:
+
+- `receipt.job.started`: the worker claimed a saved receipt.
+- `ai.request.started`: outgoing endpoint, model, format, and image byte count.
+  This records the attempt, not proof that a provider received it.
+- `ai.response.received`: HTTP status and provider request ID when available.
+- `ai.request.completed`: validated output, duration, item count, and provider
+  generation ID when available. This is not yet a database commit.
+- `ai.request.failed`: safe error message and the exact failure `stage`.
+- `receipt.job.completed`, `receipt.job.retry_scheduled`, or
+  `receipt.job.failed`: committed database outcome.
+
+Failure stages distinguish network/timeout errors, HTTP rejection, invalid
+response JSON, missing message content, malformed receipt JSON, truncation,
+refusal, provider errors (including HTTP 200 error envelopes), and application
+schema validation. For `application_schema`, `issues` shows field paths and
+expected types, for example `total (invalid_type; expected string)`, rather than
+claiming every problem is unsupported structured output.
+
+Logs omit API keys, authorization headers, URL credentials/query strings, image
+data, prompts, and raw receipt/provider text. Do not paste private raw responses
+into shared threads. Raw responses remain in `extraction_runs.raw` in PostgreSQL
+for private inspection; validation errors are also saved on the receipt.
+Existing failures are not replayed into logs at startup. These application logs
+do not control what appears in OpenRouter's activity dashboard.
+
 ## Code map and operational limits
 
 - `src/shared/contracts.ts`: shared validation and HTTP contract.

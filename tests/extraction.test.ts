@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { Extraction } from "../src/shared/contracts";
 import { loadConfig } from "../src/server/config";
 import { extractReceipt, ExtractionError, providerSchema } from "../src/server/ai/extractor";
@@ -92,5 +92,96 @@ describe("provider protocol", () => {
       }
     }
     await expect(extractReceipt(new Uint8Array(), "image/png", [], config, mockFetch(() => { throw new Error("secret network diagnostics"); }))).rejects.toMatchObject({ retryable: true });
+  });
+});
+
+async function captureLogs(run: (logs: Record<string, unknown>[]) => Promise<void>) {
+  const logs: Record<string, unknown>[] = [];
+  const capture = (line: unknown) => { logs.push(JSON.parse(String(line))); };
+  const info = spyOn(console, "info").mockImplementation(capture);
+  const error = spyOn(console, "error").mockImplementation(capture);
+  try { await run(logs); } finally { info.mockRestore(); error.mockRestore(); }
+}
+
+describe("safe provider diagnostics", () => {
+  test("request and response metadata correlate without credentials or receipt contents", async () => {
+    await captureLogs(async logs => {
+      const privateConfig = {
+        ...config,
+        ai: { ...config.ai, baseUrl: "https://username:password@openrouter.ai/api/v1?token=query-secret#fragment-secret" },
+      };
+      await extractReceipt(Buffer.from("private image bytes"), "image/png", [], privateConfig, mockFetch(() =>
+        Response.json({ id: "gen-test", choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ ...valid(), merchantName: "PRIVATE STORE" }) } }] },
+          { headers: { "x-request-id": "provider-request-123" } })),
+      { receiptId: "receipt-123", jobId: "job-123", attempt: 2 });
+      expect(logs.map(log => log.event)).toEqual(["ai.request.started", "ai.response.received", "ai.request.completed"]);
+      expect(logs[0]).toMatchObject({ endpoint: "https://openrouter.ai/api/v1", receiptId: "receipt-123", attempt: 2, model: "vision", responseFormat: "json_schema" });
+      expect(logs[1]).toMatchObject({ httpStatus: 200, providerRequestId: "provider-request-123" });
+      expect(logs[2]).toMatchObject({ providerGenerationId: "gen-test", finishReason: "stop", itemCount: 2 });
+      expect(new Set(logs.map(log => log.requestId)).size).toBe(1);
+      for (const privateValue of [config.ai.apiKey, "username", "password", "query-secret", "fragment-secret", "PRIVATE STORE", Buffer.from("private image bytes").toString("base64")]) {
+        expect(JSON.stringify(logs)).not.toContain(privateValue);
+      }
+    });
+  });
+
+  test("schema failure prints field paths and expected types, not rejected values", async () => {
+    await captureLogs(async logs => {
+      const output = { ...valid(), merchantName: "PRIVATE STORE", total: 0.3, purchasedAt: "private-invalid-date" };
+      await expect(extractReceipt(new Uint8Array(), "image/png", [], config, mockFetch(() => reply(JSON.stringify(output)))))
+        .rejects.toMatchObject({
+          diagnostics: {
+            stage: "application_schema",
+            issues: [
+              { path: "purchasedAt", code: "invalid_format" },
+              { path: "total", code: "invalid_type", expected: "string" },
+            ],
+          },
+        });
+      const failure = logs.find(log => log.event === "ai.request.failed")!;
+      expect(failure.error).toContain("AI output did not match the receipt schema.");
+      expect(failure.error).toContain("total (invalid_type; expected string)");
+      expect(failure.stage).toBe("application_schema");
+      expect(failure.retryable).toBe(false);
+      expect(JSON.stringify(logs)).not.toContain("PRIVATE STORE");
+      expect(JSON.stringify(logs)).not.toContain("private-invalid-date");
+      expect(logs.some(log => log.event === "ai.request.completed")).toBe(false);
+    });
+  });
+
+  test("distinguishes malformed JSON, missing content, truncation, refusal and provider errors", async () => {
+    const cases: [unknown, string, boolean][] = [
+      ["private-not-json", "response_json", false],
+      [{ choices: [{ message: { content: "private-invalid-output" } }] }, "content_json", false],
+      [{ choices: [{ message: { content: null } }] }, "message_content", false],
+      [{ choices: [{ finish_reason: "length", message: { content: "{}" } }] }, "truncated", false],
+      [{ choices: [{ message: { refusal: "private refusal text" } }] }, "refusal", false],
+      [{ error: { code: 503, message: "private provider diagnostics" } }, "provider_error", true],
+    ];
+    for (const [body, stage, retryable] of cases) {
+      await captureLogs(async logs => {
+        await expect(extractReceipt(new Uint8Array(), "image/png", [], config, mockFetch(() =>
+          typeof body === "string" ? new Response(body) : Response.json(body))))
+          .rejects.toMatchObject({ diagnostics: { stage }, retryable });
+        expect(logs.at(-1)).toMatchObject({ event: "ai.request.failed", stage, httpStatus: 200 });
+        expect(JSON.stringify(logs)).not.toContain("private");
+      });
+    }
+  });
+
+  test("network and HTTP errors log safe actionable outcomes, including empty error bodies", async () => {
+    await captureLogs(async logs => {
+      await expect(extractReceipt(new Uint8Array(), "image/png", [], config, mockFetch(() => {
+        throw new Error(`secret transport diagnostics ${config.ai.apiKey}`);
+      }))).rejects.toMatchObject({ diagnostics: { stage: "network" }, retryable: true });
+      expect(logs.map(log => log.event)).toEqual(["ai.request.started", "ai.request.failed"]);
+      expect(JSON.stringify(logs)).not.toContain(config.ai.apiKey);
+      expect(JSON.stringify(logs)).not.toContain("secret transport");
+    });
+    await captureLogs(async logs => {
+      await expect(extractReceipt(new Uint8Array(), "image/png", [], config, mockFetch(() =>
+        new Response(null, { status: 401 })))).rejects.toMatchObject({ diagnostics: { stage: "http" }, retryable: false });
+      expect(logs.at(-1)).toMatchObject({ httpStatus: 401, stage: "http" });
+    });
   });
 });
