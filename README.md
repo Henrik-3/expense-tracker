@@ -1,0 +1,231 @@
+# Receipt Ledger
+
+A mobile-first, self-hosted expense tracker written in TypeScript, running on Bun
+with PostgreSQL. Capture receipts quickly, let a vision model extract their line
+items in the background, and correct everything before using it in your reports.
+
+## What works
+
+- Camera capture and multiple image uploads (JPEG, PNG, WebP).
+- Optional photo confirmation, remembered in the browser.
+- Independent uploads: start the next photo without waiting for extraction.
+- Durable PostgreSQL jobs, bounded retries, lease recovery, and stale-worker fencing.
+- OpenAI-compatible vision extraction with validated structured output.
+- Editable shop, purchase date, currency, total, notes, every product field,
+  quantities, prices, categories, brands/manufacturers, discounts, and fees.
+- Configurable categories, including rename, archive, and unarchive.
+- Daily, Monday-based weekly, and monthly statistics; date, shop, category,
+  brand, and manufacturer filters. Currencies are always separate.
+- Responsive capture, receipt editor, category management, and insights pages.
+
+This first version is **single-user with authentication delegated to the reverse
+proxy**. The application itself has no login. Do not expose it directly to the
+internet or untrusted networks. Receipt images and financial data are private.
+
+## Run with Docker
+
+Requires Docker Engine and Docker Compose.
+
+1. Copy `.env.example` to `.env`.
+2. Set `POSTGRES_PASSWORD` to a long random alphanumeric value.
+3. Supply `AI_API_BASE_URL`, `AI_API_KEY`, and `AI_MODEL` in your private `.env`.
+   Never commit API keys. The base URL should include the provider's API prefix,
+   e.g. `https://api.openai.com/v1`, not `/chat/completions`.
+4. Start:
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+5. Open `http://localhost:3000`, or configure your authenticated reverse proxy.
+
+Compose runs two containers: the application and PostgreSQL 17. The app serves
+the built React UI, API, and worker in one process. Migrations run automatically
+under a PostgreSQL advisory lock at startup. The image runs as the non-root `bun`
+user. Bun is pinned to **1.4.2**, the installed stable version used for validation;
+change `BUN_VERSION` when upgrading and rerun the checks before deploying.
+
+The app binds to the host's loopback interface by default. PostgreSQL is not
+published to the host. Named volumes persist both PostgreSQL data and uploaded
+images. **Back up both volumes**; database-only backups cannot restore originals.
+Do not use `docker compose down -v` unless you intend to erase all stored data.
+
+If AI credentials/model are absent, uploads are still accepted and safely queued.
+The capture page displays a setup notice. Set the variables and recreate the app
+container (`docker compose up -d app`) to begin processing.
+
+### Reverse proxy
+
+TLS termination and authentication belong at the reverse proxy. Preserve the
+original `Host` header; browser write requests are checked against it. Protect
+**all routes**, including `/api`, receipt images, and the frontend. Same-origin
+checks are not authentication.
+
+Example routing **inside an already authenticated nginx server block**:
+
+```nginx
+location / {
+    client_max_body_size 17m;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_pass http://127.0.0.1:3000;
+}
+```
+
+Adjust the proxy body limit if `MAX_UPLOAD_MB` changes. If the reverse proxy is
+another container, attach it to the Compose network and use `app:3000` rather
+than container-local `127.0.0.1`. No internal TLS is needed. Serve the browser
+over HTTPS at the proxy for privacy and full mobile browser capabilities.
+
+### Configuration
+
+| Variable | Default / meaning |
+| --- | --- |
+| `DATABASE_URL` | Required for native Bun; Compose constructs it internally |
+| `POSTGRES_PASSWORD` | Required by Compose; use alphanumeric characters for URL interpolation |
+| `AI_API_BASE_URL` | `https://api.openai.com/v1` |
+| `AI_API_KEY` | Empty; provide privately |
+| `AI_MODEL` | Empty; choose a vision-capable model from your provider |
+| `AI_RESPONSE_FORMAT` | `json_schema`; explicitly use `json_object` for providers without strict schema support |
+| `AI_TIMEOUT_SECONDS` | `90`, range 1–600 |
+| `AI_MAX_CONCURRENCY` | `2`, range 1–10 per app process |
+| `MAX_UPLOAD_MB` | `15`, range 1–50 |
+| `UPLOAD_DIR` | `./data/uploads` natively; `/app/data/uploads` in Docker |
+| `HOST` | Native bind address `127.0.0.1`; image uses `0.0.0.0` inside the container |
+| `PORT` | Native HTTP port, `3000` |
+| `APP_PORT` | Published Compose host port, `3000` |
+| `BUN_VERSION` | Docker runtime/build version, `1.4.2` |
+
+If raising the AI timeout above 90 seconds, also increase Compose's
+`stop_grace_period` beyond the timeout to allow graceful shutdown. Even a forced
+shutdown is recovered by job leases on restart; the external model request may
+be repeated and billed twice. No distributed system can promise exactly-once
+calls to a third-party API without that provider's idempotency support.
+
+## Capture and review
+
+1. Take a photo or choose files. If confirmation is enabled, inspect the preview
+   and confirm or discard it.
+2. Wait for **Saved** before leaving the app. Uploading/failed/preview files live
+   only in memory; a refresh or closed tab loses those pending local files.
+3. Continue capturing while processing runs in the background.
+4. Open a receipt to view its original and edit the extracted fields.
+5. Choose **Save · Ready** or **Save · Needs review**.
+
+`Ready` requires a date, currency, total, at least one line item, known line and
+adjustment amounts, and reconciliation within **0.01 currency units**. AI warnings
+also trigger review. This is a consistency check, not a guarantee that AI text
+recognition is correct. Saving a manual correction recalculates structural
+warnings; review the original before marking it ready.
+
+Unknown amounts remain blank/null, never silently zero. Discounts are signed
+negative amounts; deposits/fees have their actual sign. Do not add tax twice.
+Printed descriptions are retained separately from normalized product names.
+Unknown brand/manufacturer stays empty rather than being inferred from a brand.
+
+Pending/processing receipts are locked for editing. Failed, unedited receipts
+can be retried. Once manually saved, a receipt cannot be re-extracted in this
+version, so retries cannot overwrite corrections. Concurrent edits use revision
+checks; a conflict retains your draft and offers an explicit refresh.
+
+## Statistics rules
+
+- Only `Ready` receipts count by default. `Needs review` is an explicit opt-in.
+- Dates use the printed purchase date, not upload time; bounds are inclusive.
+- Main totals, timeline, and shop breakdown use printed receipt totals.
+- Applying a category, brand, or manufacturer filter switches these to matching
+  **item subtotals**, clearly labeled in the UI.
+- Category/brand/manufacturer breakdowns always use item subtotals. Receipt-level
+  discounts and fees are **not allocated** among products.
+- Shop filtering is case-insensitive substring matching. Brand/manufacturer
+  filtering is case-insensitive exact matching.
+- `excludedReceipts` counts status-eligible, otherwise-matching receipts missing
+  a date, currency, or receipt total. Date-less receipts cannot match a date
+  filter. Nonmatching items/statuses are not exclusions. Unknown item amounts are
+  omitted from breakdowns, so review-inclusive reports may be partial.
+- Decimal strings cross API/database boundaries; sums use decimal arithmetic,
+  not floating point. There is no currency conversion.
+
+## Native development
+
+Install Bun, then:
+
+```sh
+bun install --frozen-lockfile
+cp .env.example .env
+# Edit .env: password, native DATABASE_URL, and optional AI configuration.
+docker compose -f compose.yaml -f compose.dev.yaml up -d db
+bun run dev
+```
+
+In another terminal:
+
+```sh
+bun run dev:web
+```
+
+Open Vite's printed URL (normally `http://localhost:5173`). Vite proxies `/api`
+to Bun on port 3000. Bun automatically loads `.env`. Alternatively, build once
+with `bun run build` and use `bun start` to serve everything from port 3000.
+
+## Verification
+
+```sh
+bun run typecheck
+bun test
+bun run build
+docker compose --env-file .env.example config --quiet
+```
+
+Without `TEST_DATABASE_URL`, real-database tests are explicitly skipped. For full
+verification, provision a **dedicated migrated test database with no other
+workers**. Tests use unique rows and remove their own data, but worker claims
+could otherwise consume unrelated pending jobs.
+
+```sh
+# Supply a private TEST_DATABASE_URL in your shell.
+DATABASE_URL="$TEST_DATABASE_URL" bun run db:migrate
+bun test
+bunx --bun playwright install chromium
+bun run test:browser
+```
+
+The browser smoke script runs the built application on an ephemeral local port
+and checks mobile and desktop capture, confirmation, upload, extraction,
+correction, statistics filters, and category archival. Set `PLAYWRIGHT_CHANNEL`
+to `msedge` or `chrome` to use an already-installed browser instead. Optional
+`SCREENSHOT_PATH` saves a mobile insights screenshot.
+
+AI requests in tests are mocked. No live API key, expense data, or paid model
+calls are needed. Real PostgreSQL 17 and a Chromium-based browser were used for
+the initial end-to-end verification. A live provider test and Docker image
+build/run still need validation in an environment with configured credentials
+and a running Docker Engine.
+
+## Code map and operational limits
+
+- `src/shared/contracts.ts`: shared validation and HTTP contract.
+- `src/server/app.ts`: receipt/category/statistics API.
+- `src/server/worker.ts`: durable jobs, leases, retries, and atomic completion.
+- `src/server/ai/extractor.ts`: provider adapter, prompt, schema, safe errors.
+- `src/server/services/`: reconciliation, statistics, durable image writes.
+- `src/server/db/`: relational schema and checksum-protected SQL migrations.
+- `src/client/`: React UI and responsive styles.
+- `scripts/browser-smoke.ts`, `tests/`: browser, unit, and integration checks.
+
+Original images and raw AI outputs remain stored. Configuring AI means receipt
+images are sent to that provider; its retention/privacy policy applies. Use disk
+encryption and protected backups where required. Provider keys stay server-side.
+
+Files are synchronized before the database references them (directory fsync on
+Linux). On uncertain database commit outcomes, a potential orphan is deliberately
+retained rather than risking deletion of a committed original. There is no
+automated orphan sweep yet. Do not delete suspected orphans while uploads run.
+
+This MVP supports one image per receipt, purchase dates (not times), flat
+categories, and an OpenAI-compatible Chat Completions vision API. No HEIC/PDF
+conversion, automatic shop-alias normalization, learned category rules, offline
+uploads, receipt deletion, CSV export, built-in accounts, or multi-page receipts
+yet. Statistics aggregate selected receipt data in process; very large datasets
+will eventually warrant SQL aggregation. Multiple app replicas must share the
+same upload volume as well as PostgreSQL.

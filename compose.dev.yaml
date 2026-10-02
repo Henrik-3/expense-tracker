@@ -1,0 +1,5 @@
+# Optional local-development overlay; the normal deployment does not expose PG.
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"

@@ -1,0 +1,35 @@
+{
+  "name": "receipt-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/server/index.ts",
+    "dev:web": "bun --bun vite --host 0.0.0.0",
+    "build": "bun --bun vite build",
+    "start": "bun run src/server/index.ts",
+    "db:migrate": "bun run src/server/db/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:browser": "bun run build && bun run scripts/browser-smoke.ts"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.90.0",
+    "decimal.js": "^10.6.0",
+    "drizzle-orm": "^0.44.5",
+    "hono": "^4.9.8",
+    "postgres": "^3.4.7",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/bun": "latest",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.3",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7"
+  }
+}
