@@ -128,10 +128,20 @@ negative amounts; deposits/fees have their actual sign. Do not add tax twice.
 Printed descriptions are retained separately from normalized product names.
 Unknown brand/manufacturer stays empty rather than being inferred from a brand.
 
-Pending/processing receipts are locked for editing. Failed, unedited receipts
-can be retried. Once manually saved, a receipt cannot be re-extracted in this
-version, so retries cannot overwrite corrections. Concurrent edits use revision
-checks; a conflict retains your draft and offers an explicit refresh.
+Pending/processing receipts are locked for editing and redetection. On the receipt
+details page, choose **Redetect receipt** to extract again from the original image,
+including after manual edits or a failed extraction. Confirming discards unsaved
+changes; successful extraction replaces the saved detected details, items, and
+adjustments, but keeps saved notes. Existing saved details are retained until
+extraction succeeds. Concurrent edits and actions use revision checks; a conflict
+retains your draft and offers an explicit refresh.
+
+Choose **Delete receipt** on the same page to permanently remove a receipt, its
+items, extraction history, and original image. Deletion requires confirmation and
+is also available while processing; a late extraction cannot restore a deleted
+receipt. The receipt disappears from the ledger and statistics. If image cleanup
+fails after database deletion, the app warns you and the server logs identify the
+orphaned image for administrator cleanup.
 
 ## Merchant grouping
 
@@ -220,7 +230,8 @@ docker compose --env-file .env.example config --quiet
 For browser UI checks without PostgreSQL or AI, run `bun run test:ui`. This builds
 the app and tests mocked API workflows at mobile and desktop widths: a 25-item
 receipt, preserved edits, keyboard interaction, settings CRUD/errors, focus
-restoration, and locked processing receipts. Use `PLAYWRIGHT_CHANNEL=msedge` or
+restoration, receipt redetection/deletion confirmations and errors, and locked
+processing receipts. Use `PLAYWRIGHT_CHANNEL=msedge` or
 `chrome` for an installed browser, or install Chromium with
 `bunx --bun playwright install chromium`. `SCREENSHOT_PATH` optionally saves the
 mobile receipt editor. These checks supplement, not replace, the database suite.

@@ -8,12 +8,13 @@ import { resolve, basename } from "node:path";
 import type { Database } from "./db";
 import type { Config } from "./config";
 import { receipts, receiptItems, receiptAdjustments, jobs, categories, merchantRules } from "./db/schema";
-import { receiptUpdateSchema, categoryInputSchema, merchantRuleInputSchema, type ReceiptDetail } from "../shared/contracts";
+import { receiptUpdateSchema, receiptRevisionSchema, categoryInputSchema, merchantRuleInputSchema, type ReceiptDetail } from "../shared/contracts";
 import { merchantResolver } from "./services/merchant-grouping";
 import { assessExtraction } from "./services/reconciliation";
 import { aggregateStatistics } from "./services/statistics";
 import { writeDurableImage } from "./services/storage";
 import { uuidSchema, paginationSchema, statsQuerySchema, imageMime } from "./api/validation";
+import { logEvent } from "./logging";
 
 type Reader = Pick<Database, "select">;
 function fail(status: 400 | 404 | 409 | 413 | 415, message: string): never { throw new HTTPException(status, { message }); }
@@ -35,7 +36,7 @@ export function createApp(db: Database, config: Config) {
   app.onError((error, c) => error instanceof HTTPException ? c.json({ error: error.message }, error.status) : c.json({ error: "Internal server error" }, 500));
   app.use("/api/*", bodyLimit({ maxSize: config.maxUploadBytes + 65536, onError: (c) => c.json({ error: "Request body too large" }, 413) }));
   app.use("/api/*", async (c, next) => {
-    if (c.req.method === "PATCH" || (c.req.method === "POST" && c.req.path !== "/api/receipts")) {
+    if (c.req.method === "PATCH" || c.req.method === "DELETE" || (c.req.method === "POST" && c.req.path !== "/api/receipts")) {
       const bytes = await c.req.arrayBuffer();
       if (bytes.byteLength > 1024 * 1024) return c.json({ error: "Request body too large" }, 413);
     }
@@ -126,20 +127,59 @@ export function createApp(db: Database, config: Config) {
     });
     return c.json({ receipt });
   });
-  app.post("/api/receipts/:id/retry", async (c) => {
-    const receiptId = id(c.req.param("id"));
-    const receipt = await db.transaction(async (tx) => {
+  const enqueue = (receiptId: string, revision?: number) =>
+    db.transaction(async (tx) => {
       // Match the worker's jobs-before-receipts locking order.
       await tx.select().from(jobs).where(eq(jobs.receiptId, receiptId)).for("update");
       const [row] = await tx.select().from(receipts).where(eq(receipts.id, receiptId)).for("update");
       if (!row) fail(404, "Receipt not found");
-      if (row.status !== "failed" || row.revision !== 0) fail(409, "Only failed, unedited receipts can be retried");
-      await tx.update(receipts).set({ status: "queued", error: null, warnings: [], updatedAt: new Date() }).where(eq(receipts.id, receiptId));
+      if (revision === undefined) {
+        if (row.status !== "failed") fail(409, "Only failed receipts can be retried");
+      } else if (row.revision !== revision || ["queued", "processing"].includes(row.status)) {
+        fail(409, "Receipt changed or is being processed");
+      }
+      // Reserve a new revision now, rather than at completion, so editors from
+      // before this extraction remain stale even after it finishes. Keep all
+      // extracted fields, warnings and child records until successful replacement.
+      await tx.update(receipts).set({ status: "queued", revision: row.revision + 1, error: null, updatedAt: new Date() }).where(eq(receipts.id, receiptId));
       const reset = { state: "pending" as const, attempts: 0, availableAt: new Date(), leaseExpiresAt: null, lockedBy: null, lastError: null };
       await tx.insert(jobs).values({ receiptId, ...reset }).onConflictDoUpdate({ target: jobs.receiptId, set: reset });
       return detail(tx, receiptId);
     });
-    return c.json({ receipt });
+  app.post("/api/receipts/:id/retry", async (c) => c.json({ receipt: await enqueue(id(c.req.param("id"))) }));
+  app.post("/api/receipts/:id/redetect", async (c) => {
+    const receiptId = id(c.req.param("id"));
+    const parsed = receiptRevisionSchema.safeParse(await json(c));
+    if (!parsed.success) fail(400, "Invalid revision");
+    return c.json({ receipt: await enqueue(receiptId, parsed.data.revision) });
+  });
+  app.delete("/api/receipts/:id", async (c) => {
+    const receiptId = id(c.req.param("id"));
+    const parsed = receiptRevisionSchema.safeParse(await json(c));
+    if (!parsed.success) fail(400, "Invalid revision");
+    const path = await db.transaction(async (tx) => {
+      await tx.select().from(jobs).where(eq(jobs.receiptId, receiptId)).for("update");
+      const [row] = await tx.select().from(receipts).where(eq(receipts.id, receiptId)).for("update");
+      if (!row) fail(404, "Receipt not found");
+      if (row.revision !== parsed.data.revision) fail(409, "Receipt changed");
+      if (!/^[0-9a-f-]+\.(jpg|png|webp)$/.test(row.imagePath)) throw new Error("Unsafe image metadata");
+      const imagePath = resolve(config.uploadDir, row.imagePath);
+      // Foreign keys cascade jobs, extraction runs, items and adjustments.
+      await tx.delete(receipts).where(eq(receipts.id, receiptId));
+      return imagePath;
+    });
+    let imageCleanup: "removed" | "failed" = "removed";
+    try { await unlink(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        imageCleanup = "failed";
+        // The database deletion has committed. Report it truthfully and retain
+        // an operational breadcrumb for orphan cleanup; do not return a 500
+        // that would suggest the receipt still exists.
+        logEvent("error", "receipt.image.cleanup_failed", { receiptId, imagePath: path });
+      }
+    }
+    return c.json({ deleted: true as const, imageCleanup });
   });
   app.get("/api/categories", async (c) => c.json({ categories: await db.select().from(categories).orderBy(categories.name) }));
   app.get("/api/merchant-rules", async (c) => c.json({ rules: await db.select().from(merchantRules).orderBy(merchantRules.matchType, merchantRules.matchName, merchantRules.id) }));

@@ -21,7 +21,7 @@ export async function processOneJob(db: Database, config: Config, fetcher: typeo
     `).orderBy(jobs.availableAt).limit(1).for("update", { skipLocked: true });
     if (!job) return null;
     const [receipt] = await tx.select().from(receipts).where(eq(receipts.id, job.receiptId)).for("update");
-    if (!receipt || receipt.revision !== 0 || !["queued", "processing"].includes(receipt.status)) {
+    if (!receipt || !["queued", "processing"].includes(receipt.status)) {
       await tx.update(jobs).set({ state: "failed", lockedBy: null, leaseExpiresAt: null, lastError: "Receipt is no longer eligible for extraction." }).where(eq(jobs.id, job.id));
       return { skipped: true, job, reason: "stale_revision" } as const;
     }
@@ -69,7 +69,7 @@ export async function processOneJob(db: Database, config: Config, fetcher: typeo
     const [job] = await tx.select().from(jobs).where(eq(jobs.id, claim.job.id)).for("update");
     if (!job || job.state !== "running" || job.lockedBy !== claim.token || !job.leaseExpiresAt || job.leaseExpiresAt <= new Date()) return { event: "receipt.job.skipped", reason: "stale_ownership" } as const;
     const [receipt] = await tx.select().from(receipts).where(eq(receipts.id, claim.receipt.id)).for("update");
-    if (!receipt || receipt.revision !== claim.receipt.revision || receipt.revision !== 0 || receipt.status !== "processing") {
+    if (!receipt || receipt.revision !== claim.receipt.revision || receipt.status !== "processing") {
       await tx.update(jobs).set({ state: "failed", lockedBy: null, leaseExpiresAt: null, lastError: "Receipt changed during extraction." }).where(eq(jobs.id, job.id));
       return { event: "receipt.job.skipped", reason: "stale_revision" } as const;
     }

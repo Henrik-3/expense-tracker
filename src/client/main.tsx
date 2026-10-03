@@ -2,7 +2,7 @@ import React, { Component, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Button, Fieldset, Legend, Select, Textarea, Tab, TabGroup, TabList, TabPanel, TabPanels } from "@headlessui/react";
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { receiptUpdateSchema, type ReceiptDetail, type ReceiptUpdate, type ReceiptListResponse, type Category, type StatsResponse, type Breakdown } from "../shared/contracts";
+import { receiptUpdateSchema, type ReceiptDetail, type ReceiptUpdate, type ReceiptDeleteResponse, type ReceiptListResponse, type Category, type StatsResponse, type Breakdown } from "../shared/contracts";
 import { createUploadId } from "./upload-id";
 import { api, json, RequestError } from "./api";
 import { ErrorMessage, Field, Toggle } from "./ui";
@@ -101,6 +101,8 @@ function Detail({ id, back, onDirty }: { id: string; back: () => void; onDirty: 
   const query = useQuery({ queryKey: ["receipt", id], queryFn: () => api<{ receipt: ReceiptDetail }>(`/receipts/${id}`), refetchInterval: q => q.state.data && busy(q.state.data.receipt.status) ? 2000 : false });
   const [draft, setDraft] = useState<ReceiptDraft | null>(null); const [dirty, setDirty] = useState(false); const [validation, setValidation] = useState(""); const [message, setMessage] = useState("");
   const receipt = query.data?.receipt;
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { if (receipt && !dirty) setDraft(draftOf(receipt)); }, [receipt, dirty]);
   useEffect(() => { onDirty(dirty); return () => onDirty(false); }, [dirty, onDirty]);
   useEffect(() => {
@@ -109,15 +111,56 @@ function Detail({ id, back, onDirty }: { id: string; back: () => void; onDirty: 
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
   const mutation = useMutation({ mutationFn: (value: ReceiptUpdate) => api<{ receipt: ReceiptDetail }>(`/receipts/${id}`, json(value, "PATCH")), onSuccess: result => { setDirty(false); setDraft(draftOf(result.receipt)); qc.setQueryData(["receipt", id], result); void qc.invalidateQueries({ queryKey: ["receipts"] }); void qc.invalidateQueries({ queryKey: ["stats"] }); setMessage(result.receipt.status === "ready" ? "Saved as ready." : "Saved for review. Check any warnings before marking ready."); } });
-  const retry = useMutation({ mutationFn: () => api(`/receipts/${id}/retry`, json({})), onSuccess: () => { void query.refetch(); void qc.invalidateQueries({ queryKey: ["receipts"] }); } });
+  const redetect = useMutation({
+    mutationFn: (revision: number) => api<{ receipt: ReceiptDetail }>(`/receipts/${id}/redetect`, json({ revision })),
+    onSuccess: async result => {
+      await qc.cancelQueries({ queryKey: ["receipt", id] });
+      setDirty(false); setDraft(draftOf(result.receipt)); setValidation(""); mutation.reset();
+      qc.setQueryData(["receipt", id], result);
+      void qc.invalidateQueries({ queryKey: ["receipts"] }); void qc.invalidateQueries({ queryKey: ["stats"] });
+      setMessage("Redetection queued. Existing details will be replaced when extraction succeeds.");
+    },
+  });
+  const deletion = useMutation({
+    mutationFn: (revision: number) => api<ReceiptDeleteResponse>(`/receipts/${id}`, json({ revision }, "DELETE")),
+    onSuccess: async result => {
+      await qc.cancelQueries({ queryKey: ["receipt", id] });
+      if (result.imageCleanup === "failed") window.alert("The receipt was deleted, but its original image could not be removed from storage. Ask your server administrator to check the cleanup error in the server logs.");
+      // A response may arrive after navigation to another receipt. Only the
+      // originating detail instance may clear its draft and navigate away.
+      if (mounted.current) { setDirty(false); back(); }
+      qc.removeQueries({ queryKey: ["receipt", id] });
+      void qc.invalidateQueries({ queryKey: ["receipts"] }); void qc.invalidateQueries({ queryKey: ["stats"] });
+    },
+  });
   const edit = (patch: Partial<ReceiptDraft>) => { setDraft(d => d ? { ...d, ...patch } : d); setDirty(true); setMessage(""); };
   function save(status: ReceiptUpdate["status"]) { if (!draft) return; const result = receiptUpdateSchema.safeParse({ ...draft, status }); if (!result.success) { setValidation(result.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ")); return; } setValidation(""); mutation.mutate(result.data); }
-  const locked = !receipt || busy(receipt.status) || mutation.isPending;
+  const actionPending = mutation.isPending || redetect.isPending || deletion.isPending;
+  const locked = !receipt || busy(receipt.status) || actionPending;
+  const actionError = redetect.error || deletion.error;
   return <section><Button className="quiet" onClick={() => { if (!dirty || window.confirm("Leave without saving your edits?")) back(); }}>← All receipts</Button><h1>Receipt details</h1><ErrorMessage error={query.error} />
     {query.isPending && <p role="status">Loading receipt…</p>}
     {receipt && draft && <><div className="section-heading"><span className={`badge ${receipt.status}`}>{label(receipt.status)}</span><span className="muted">Revision {receipt.revision}{dirty ? " · Unsaved changes" : ""}</span></div>
+      <div className="actions">
+        <Button disabled={locked} onClick={() => {
+          if (window.confirm("Redetect this receipt from the original image? Successful extraction will replace detected details, including manual corrections. Saved notes will be kept. Unsaved changes will be discarded.")) {
+            deletion.reset(); setMessage(""); redetect.mutate(draft.revision);
+          }
+        }}>{redetect.isPending ? "Queuing redetection…" : "Redetect receipt"}</Button>
+        <Button className="danger" disabled={actionPending} onClick={() => {
+          if (window.confirm("Permanently delete this receipt and its original image? All details and any unsaved changes will be lost. This cannot be undone.")) {
+            redetect.reset(); setMessage(""); deletion.mutate(draft.revision);
+          }
+        }}>{deletion.isPending ? "Deleting…" : "Delete receipt"}</Button>
+      </div>
+      <ErrorMessage error={actionError} />
+      {actionError instanceof RequestError && actionError.status === 409 && <p className="notice">This receipt changed on the server. Your edits are still here. <Button onClick={async () => {
+        if (!dirty || window.confirm("Discard your edits and load the latest version?")) {
+          redetect.reset(); deletion.reset(); setDirty(false); await query.refetch();
+        }
+      }}>Refresh latest version</Button> before trying again.</p>}
       {busy(receipt.status) && <p className="notice" role="status">Your receipt is saved. We’re extracting its details in the background. Editing will become available when processing finishes.</p>}
-      {receipt.error && <p className="error">{receipt.error}</p>}{receipt.status === "failed" && receipt.revision === 0 && <Button disabled={retry.isPending} onClick={() => retry.mutate()}>Retry extraction</Button>}<ErrorMessage error={retry.error} />
+      {receipt.error && <p className="error">{receipt.error}</p>}
       {!!receipt.warnings.length && <div className="notice"><strong>Review notes</strong><ul>{receipt.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul></div>}
       <div className="detail-grid"><aside className="original"><h2>Original receipt</h2><a href={receipt.imageUrl} target="_blank" rel="noreferrer">Open full image ↗</a><img src={receipt.imageUrl} alt="Original uploaded receipt" onError={e => { e.currentTarget.alt = "Receipt image could not load. Use Open full image to retry."; }} /></aside>
       <div><Fieldset as="fieldset" disabled={locked}><Legend as="legend">Receipt information</Legend><div className="fields"><Field name="Shop / merchant" value={draft.merchantName} onChange={v => edit({ merchantName: nullable(v) })} /><Field name="Purchase date" type="date" value={draft.purchasedAt} onChange={v => edit({ purchasedAt: nullable(v) })} /><Field name="Currency (3-letter code)" value={draft.currency} onChange={v => edit({ currency: nullable(v.toUpperCase()) })} /><Field name="Receipt total" value={draft.total} onChange={v => edit({ total: nullable(v) })} /></div>

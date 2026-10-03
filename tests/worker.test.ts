@@ -63,8 +63,8 @@ test("expired final attempt becomes failed without contacting provider", async (
   expect(writes.find(write => write.table === extractionRuns)!.values.model).toBe("vision");
 });
 
-test("manual revision is never overwritten or extracted", async () => {
-  const { db, writes } = scriptedDatabase([[{ ...job, attempts: 0 }], [{ ...receipt, revision: 1 }]]);
+test("idle manually edited receipt is never extracted", async () => {
+  const { db, writes } = scriptedDatabase([[{ ...job, attempts: 0 }], [{ ...receipt, status: "ready", revision: 1 }]]);
   expect(await processOneJob(db, enabledConfig)).toBe(true);
   expect(writes).toHaveLength(1);
   expect(writes[0]!.table).toBe(jobs);
@@ -93,14 +93,14 @@ test("stale fencing token prevents completion writes", async () => {
   }
 });
 
-test("committed image failure logs a safe message and correlation metadata", async () => {
+test("explicitly queued nonzero revision is claimed and failure logs safe correlation metadata", async () => {
   const info = spyOn(console, "info").mockImplementation(() => {});
   const error = spyOn(console, "error").mockImplementation(() => {});
   try {
     const scripted = scriptedDatabase([
-      [{ ...job, attempts: 0 }], [receipt],
+      [{ ...job, attempts: 0 }], [{ ...receipt, status: "queued", revision: 3 }],
       () => [{ ...job, attempts: 1, state: "running", lockedBy: scripted.writes[0]!.values.lockedBy, leaseExpiresAt: new Date(Date.now() + 1_000_000) }],
-      [receipt],
+      [{ ...receipt, status: "processing", revision: 3 }],
     ]);
     expect(await processOneJob(scripted.db, enabledConfig)).toBe(true);
     expect(JSON.parse(error.mock.calls[0]![0])).toMatchObject({

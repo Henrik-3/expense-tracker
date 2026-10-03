@@ -43,6 +43,15 @@ export const receiptUpdateSchema = receiptFieldsSchema.extend({
 });
 export type ReceiptUpdate = z.infer<typeof receiptUpdateSchema>;
 
+export const receiptRevisionSchema = z.object({
+  revision: z.number().int().nonnegative(),
+});
+export type ReceiptRevision = z.infer<typeof receiptRevisionSchema>;
+export interface ReceiptDeleteResponse {
+  deleted: true;
+  imageCleanup: "removed" | "failed";
+}
+
 export interface ReceiptSummary extends z.infer<typeof receiptFieldsSchema> {
   merchantGroup: string | null;
   id: string;
@@ -113,6 +122,13 @@ export interface StatsResponse {
 // GET /api/receipts/:id -> { receipt: ReceiptDetail }
 // PATCH /api/receipts/:id (ReceiptUpdate) -> { receipt: ReceiptDetail }
 // POST /api/receipts/:id/retry -> { receipt: ReceiptDetail }
+// POST /api/receipts/:id/redetect (ReceiptRevision) -> { receipt: ReceiptDetail }
+// DELETE /api/receipts/:id (ReceiptRevision) -> ReceiptDeleteResponse
+// Redetect/retry reserve a new revision at enqueue, keep extracted data until
+// success, and preserve notes. Redetect rejects queued/processing receipts.
+// Delete supports every status and cascades related data. imageCleanup: "failed"
+// still means the database deletion committed; the logged orphan requires
+// operator cleanup (no automatic retry). Already-missing images count as removed.
 // GET /api/receipts/:id/image -> original image
 // GET /api/categories -> { categories: Category[] } (includes archived)
 // POST /api/categories (categoryInputSchema) -> { category: Category }

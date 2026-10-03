@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import { createDatabase } from "../src/server/db";
 import { migrate } from "../src/server/db/migrate";
-import { categories, jobs, receipts, merchantRules } from "../src/server/db/schema";
+import { categories, jobs, receipts, merchantRules, extractionRuns, receiptItems, receiptAdjustments } from "../src/server/db/schema";
 import { loadConfig } from "../src/server/config";
 import { createServer } from "../src/server/server";
 import { processOneJob } from "../src/server/worker";
@@ -76,6 +76,17 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  const action = (id: string, method: "POST" | "DELETE", body: unknown, suffix = "") => request(`/api/receipts/${id}${suffix}`, {
+    method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const detected: Extraction = {
+    merchantName: "Redetected shop", purchasedAt: "2026-06-02", currency: "EUR", total: "2.50",
+    items: [{ description: "NEW ITEM", productName: null, quantity: "1", unit: null, unitPrice: "3.00", lineTotal: "3.00", categoryId: null, brand: null, manufacturer: null }],
+    adjustments: [{ description: "New coupon", kind: "discount", amount: "-0.50" }], warnings: [],
+  };
+  const detectionFetch = (async () => Response.json({
+    choices: [{ message: { content: JSON.stringify(detected) } }],
+  })) as unknown as typeof fetch;
 
   test("capture, durable extraction, corrections, and item-level statistics", async () => {
     const receiptId = randomUUID();
@@ -281,6 +292,136 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
     expect(health.status).toBe(200);
     expect(await health.json()).toEqual({ status: "ok", aiConfigured: true });
     expect((await request("/api/does-not-exist")).status).toBe(404);
+  });
+
+  test("redetection of an edited receipt reserves a revision and replaces data only on success", async () => {
+    const receiptId = randomUUID();
+    receiptIds.push(receiptId);
+    await upload(receiptId);
+    await processOneJob(database.db, config, detectionFetch);
+    const original = await getReceipt(receiptId);
+    const edited = { ...update(original), merchantName: "Manually corrected", notes: "Keep my notes" };
+    edited.items[0] = { ...edited.items[0]!, description: "Manual item" };
+    expect((await patch(receiptId, edited)).status).toBe(200);
+    const saved = await getReceipt(receiptId);
+    const queuedResponse = await action(receiptId, "POST", { revision: saved.revision }, "/redetect");
+    expect(queuedResponse.status).toBe(200);
+    const queued: ReceiptDetail = (await queuedResponse.json()).receipt;
+    expect(queued.status).toBe("queued");
+    expect(queued.revision).toBe(saved.revision + 1);
+    expect(queued.merchantName).toBe(saved.merchantName);
+    expect(queued.items).toEqual(saved.items);
+    expect(queued.adjustments).toEqual(saved.adjustments);
+    expect(queued.notes).toBe(saved.notes);
+    expect((await action(receiptId, "POST", { revision: queued.revision }, "/redetect")).status).toBe(409);
+    expect((await action(receiptId, "DELETE", { revision: saved.revision })).status).toBe(409);
+    expect((await patch(receiptId, update(saved))).status).toBe(409);
+    await processOneJob(database.db, config, detectionFetch);
+    const completed = await getReceipt(receiptId);
+    expect(completed.status).toBe("ready");
+    expect(completed.revision).toBe(queued.revision);
+    expect(completed.merchantName).toBe(detected.merchantName);
+    expect(completed.items[0]?.description).toBe("NEW ITEM");
+    expect(completed.items[0]?.id).not.toBe(saved.items[0]?.id);
+    expect(completed.notes).toBe(saved.notes);
+    expect((await patch(receiptId, update(saved))).status).toBe(409);
+    expect((await action(receiptId, "POST", { revision: saved.revision }, "/redetect")).status).toBe(409);
+  });
+
+  test("failed redetection preserves saved data and legacy retry handles nonzero revisions", async () => {
+    const receiptId = randomUUID();
+    receiptIds.push(receiptId);
+    await upload(receiptId);
+    await processOneJob(database.db, config, detectionFetch);
+    expect((await patch(receiptId, { ...update(await getReceipt(receiptId)), status: "needs_review", total: "9.99" })).status).toBe(200);
+    const saved = await getReceipt(receiptId);
+    expect((await action(receiptId, "POST", { revision: saved.revision }, "/redetect")).status).toBe(200);
+    const invalidFetch = (async () => Response.json({ choices: [{ message: { content: "{}" } }] })) as unknown as typeof fetch;
+    await processOneJob(database.db, config, invalidFetch);
+    const failed = await getReceipt(receiptId);
+    expect(failed.status).toBe("failed");
+    expect(failed.revision).toBe(saved.revision + 1);
+    expect(failed.items).toEqual(saved.items);
+    expect(failed.adjustments).toEqual(saved.adjustments);
+    expect(failed.total).toBe(saved.total);
+    const retried = await request(`/api/receipts/${receiptId}/retry`, { method: "POST" });
+    expect(retried.status).toBe(200);
+    expect((await retried.json()).receipt.revision).toBe(failed.revision + 1);
+    await processOneJob(database.db, config, detectionFetch);
+    expect((await getReceipt(receiptId)).status).toBe("ready");
+  });
+
+  test("receipt actions validate revisions and missing IDs", async () => {
+    const receiptId = randomUUID();
+    for (const [method, suffix] of [["POST", "/redetect"], ["DELETE", ""]] as const) {
+      for (const revision of [undefined, null, -1, 0.5, "0"]) {
+        expect((await action(receiptId, method, { revision }, suffix)).status).toBe(400);
+      }
+      expect((await action(receiptId, method, { revision: 0 }, suffix)).status).toBe(404);
+      expect((await action("invalid", method, { revision: 0 }, suffix)).status).toBe(400);
+      expect((await request(`/api/receipts/${receiptId}${suffix}`, { method, body: "not json" })).status).toBe(400);
+    }
+  });
+
+  test("deletion cascades data and removes image; a late processing worker cannot resurrect it", async () => {
+    const receiptId = randomUUID();
+    receiptIds.push(receiptId);
+    await upload(receiptId);
+    await processOneJob(database.db, config, detectionFetch);
+    const saved = await getReceipt(receiptId);
+    const [row] = await database.db.select().from(receipts).where(eq(receipts.id, receiptId));
+    const imagePath = resolve(uploadDir, row!.imagePath);
+    expect((await stat(imagePath)).isFile()).toBe(true);
+    expect((await action(receiptId, "POST", { revision: saved.revision }, "/redetect")).status).toBe(200);
+    let entered!: () => void;
+    const fetching = new Promise<void>(resolve => { entered = resolve; });
+    let release!: (response: Response) => void;
+    const delayed = (async () => {
+      entered();
+      return new Promise<Response>(resolve => { release = resolve; });
+    }) as unknown as typeof fetch;
+    const worker = processOneJob(database.db, config, delayed);
+    await fetching;
+    try {
+      const current = await getReceipt(receiptId);
+      expect(current.status).toBe("processing");
+      expect((await action(receiptId, "POST", { revision: current.revision }, "/redetect")).status).toBe(409);
+      const deleted = await action(receiptId, "DELETE", { revision: current.revision });
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toEqual({ deleted: true, imageCleanup: "removed" });
+      expect((await request(saved.imageUrl)).status).toBe(404);
+      await expect(stat(imagePath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      release(await detectionFetch("http://unused"));
+      await worker;
+    }
+    for (const table of [jobs, extractionRuns, receiptItems, receiptAdjustments]) {
+      expect(await database.db.select().from(table).where(eq(table.receiptId, receiptId))).toHaveLength(0);
+    }
+    expect((await request(`/api/receipts/${receiptId}`)).status).toBe(404);
+    expect((await action(receiptId, "DELETE", { revision: saved.revision + 1 })).status).toBe(404);
+  });
+
+  test("post-commit unlink failure reports successful deletion and unsafe image paths never unlink", async () => {
+    const receiptId = randomUUID();
+    receiptIds.push(receiptId);
+    const imagePath = `${receiptId}.png`;
+    // A directory at the validated image path forces unlink to fail on all platforms.
+    await mkdir(resolve(uploadDir, imagePath));
+    await database.db.insert(receipts).values({
+      id: receiptId, imagePath, imageMime: "image/png", imageSha256: "test", originalFilename: "test.png",
+    });
+    const deleted = await action(receiptId, "DELETE", { revision: 0 });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ deleted: true, imageCleanup: "failed" });
+    expect((await request(`/api/receipts/${receiptId}`)).status).toBe(404);
+    const unsafeId = randomUUID();
+    receiptIds.push(unsafeId);
+    await database.db.insert(receipts).values({
+      id: unsafeId, imagePath: "../outside.png", imageMime: "image/png", imageSha256: "test", originalFilename: "test.png",
+    });
+    expect((await action(unsafeId, "DELETE", { revision: 0 })).status).toBe(500);
+    expect((await getReceipt(unsafeId)).status).toBe("queued");
   });
 
   test("an uncertain commit acknowledgement never removes a committed original", async () => {

@@ -74,6 +74,10 @@ try {
     let saved: ReceiptUpdate | undefined;
     let saveGate: Promise<void> | undefined;
     let releaseSave: (() => void) | undefined;
+    let deleted = false;
+    let redetectCalls = 0;
+    let deleteCalls = 0;
+    let actionError: string | undefined;
     let rules: MerchantRule[] = [{ id: ruleId, matchName: "REWE", merchantName: "REWE", matchType: "prefix" }];
     let categories = [{ id: categoryId, name: "Groceries", archived: false }];
     await page.route("**/api/**", async route => {
@@ -108,12 +112,27 @@ try {
         receipt.merchantGroup = rule.merchantName;
         return respond({ rule });
       }
-      if (path === "/api/receipts") return respond({ receipts: [receipt], total: 1 });
+      if (path === "/api/receipts") return respond({ receipts: deleted ? [] : [receipt], total: deleted ? 0 : 1 });
+      if (path === `/api/receipts/${receiptId}/redetect`) {
+        redetectCalls++;
+        expect(route.request().postDataJSON()).toEqual({ revision: receipt.revision });
+        if (actionError) return respond({ error: actionError }, 409);
+        receipt = { ...receipt, revision: receipt.revision + 1, status: "queued" };
+        return respond({ receipt });
+      }
       if (path.endsWith("/image")) return route.fulfill({
         contentType: "image/png",
         body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j0WQAAAAASUVORK5CYII=", "base64"),
       });
       if (path === `/api/receipts/${receiptId}`) {
+        if (method === "DELETE") {
+          deleteCalls++;
+          expect(route.request().postDataJSON()).toEqual({ revision: receipt.revision });
+          if (actionError) return respond({ error: actionError }, 500);
+          deleted = true;
+          return respond({ deleted: true, imageCleanup: width === 390 ? "failed" : "removed" });
+        }
+        if (deleted) return respond({ error: "Receipt not found" }, 404);
         if (method === "PATCH") {
           saved = route.request().postDataJSON() as ReceiptUpdate;
           receipt = { ...receipt, ...saved, revision: receipt.revision + 1,
@@ -234,9 +253,137 @@ try {
     await expect(page.getByLabel("Shop / merchant")).toBeDisabled();
     await expect(page.locator(".line-item-summary").first()).toBeDisabled();
     await expect(page.getByRole("button", { name: "+ Add item", exact: true })).toBeDisabled();
+    const redetect = page.getByRole("button", { name: "Redetect receipt", exact: true });
+    const remove = page.getByRole("button", { name: "Delete receipt", exact: true });
+    await expect(redetect).toBeDisabled();
+    await expect(remove).toBeEnabled();
+    receipt.status = "ready";
+    await expect(redetect).toBeEnabled({ timeout: 6000 });
+    await page.getByLabel("Shop / merchant").fill("Unsaved correction");
+    page.once("dialog", dialog => dialog.dismiss());
+    await redetect.click();
+    expect(redetectCalls).toBe(0);
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue("Unsaved correction");
+    actionError = "Receipt changed on the server";
+    page.once("dialog", dialog => dialog.accept());
+    await redetect.click();
+    await expect(page.getByRole("alert")).toContainText(actionError);
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue("Unsaved correction");
+    page.once("dialog", dialog => dialog.accept());
+    await page.getByRole("button", { name: "Refresh latest version", exact: true }).click();
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue(receipt.merchantName!);
+    actionError = undefined;
+    await page.getByLabel("Shop / merchant").fill("Discard on redetection");
+    page.once("dialog", async dialog => {
+      expect(dialog.message()).toContain("Unsaved changes will be discarded");
+      await dialog.accept();
+    });
+    await redetect.click();
+    await expect(redetect).toBeDisabled();
+    await expect(page.getByLabel("Shop / merchant")).toBeDisabled();
+    await expect(page.getByText(/Unsaved changes/, { exact: false })).toHaveCount(0);
+    expect(redetectCalls).toBe(2);
+    receipt = { ...receipt, status: "ready", merchantName: "Redetected shop", merchantGroup: "Redetected shop" };
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue("Redetected shop", { timeout: 6000 });
+    await page.getByLabel("Shop / merchant").fill("Keep if delete fails");
+    page.once("dialog", dialog => dialog.dismiss());
+    await remove.click();
+    expect(deleteCalls).toBe(0);
+    actionError = "Deletion failed";
+    page.once("dialog", dialog => dialog.accept());
+    await remove.click();
+    await expect(page.getByRole("alert")).toContainText("Deletion failed");
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue("Keep if delete fails");
+    actionError = undefined;
+    let cleanupWarning = false;
+    page.once("dialog", async dialog => {
+      expect(dialog.message()).toContain("cannot be undone");
+      if (width === 390) page.once("dialog", async warning => {
+        expect(warning.type()).toBe("alert");
+        expect(warning.message()).toContain("original image could not be removed");
+        cleanupWarning = true;
+        await warning.accept();
+      });
+      await dialog.accept();
+    });
+    await remove.click();
+    await expect(page.getByRole("heading", { name: "A clean slate" })).toBeVisible();
+    await expect(page.locator(".receipt-row")).toHaveCount(0);
+    expect(deleteCalls).toBe(2);
+    expect(cleanupWarning).toBe(width === 390);
+    await noOverflow(page);
     expect(errors).toEqual([]);
     await page.close();
-    console.info(`UI smoke passed at ${width}px: 25 compact items, edits/add/remove/save, keyboard tabs/disclosures, rule CRUD/errors/focus restoration, cache refresh, disabled processing state.`);
+    console.info(`UI smoke passed at ${width}px: 25 compact items, edits/add/remove/save, keyboard tabs/disclosures, rule CRUD/errors/focus restoration, receipt redetection/deletion confirmations and errors, cache refresh, disabled processing state.`);
+  }
+  // Destructive actions must respect the displayed draft and their originating page.
+  {
+    const page = await browser.newPage();
+    await page.clock.install();
+    let first = fixture();
+    const second = { ...fixture(), id: crypto.randomUUID(), merchantName: "Second receipt", merchantGroup: "Second receipt" };
+    let deleted = false;
+    let deleteGate: Promise<void> | undefined;
+    let releaseDelete: (() => void) | undefined;
+    await page.route("**/api/**", async route => {
+      const path = new URL(route.request().url()).pathname;
+      const method = route.request().method();
+      const respond = (data: unknown, status = 200) => route.fulfill({ status, json: data });
+      if (path === "/api/health") return respond({ aiConfigured: true, status: "ok" });
+      if (path === "/api/categories") return respond({ categories: [] });
+      if (path === "/api/receipts") return respond({ receipts: deleted ? [second] : [first, second], total: deleted ? 1 : 2 });
+      if (path.endsWith("/image")) return route.fulfill({ contentType: "image/png", body: image });
+      if (path === `/api/receipts/${second.id}`) return respond({ receipt: second });
+      if (path === `/api/receipts/${receiptId}/redetect` || (path === `/api/receipts/${receiptId}` && method === "DELETE")) {
+        const revision = route.request().postDataJSON().revision;
+        if (revision !== first.revision) return respond({ error: "Receipt changed" }, 409);
+        // Only the delayed deletion below should reach a successful mutation.
+        expect(method).toBe("DELETE");
+        expect(deleteGate).toBeDefined();
+        await deleteGate;
+        deleted = true;
+        return respond({ deleted: true, imageCleanup: "removed" });
+      }
+      if (path === `/api/receipts/${receiptId}`) return respond({ receipt: first });
+      return respond({ error: `Unexpected route ${method} ${path}` }, 500);
+    });
+    await page.goto(server.url.toString());
+    await page.getByRole("button", { name: "Receipts", exact: true }).click();
+    await page.locator(".receipt-row").first().click();
+    await page.getByLabel("Shop / merchant").fill("Local unsaved draft");
+    first = { ...first, revision: 1, merchantName: "Changed in another tab" };
+    await page.clock.fastForward(6000);
+    await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await expect(page.getByText("Revision 1 · Unsaved changes", { exact: true })).toBeVisible();
+    for (const name of ["Redetect receipt", "Delete receipt"]) {
+      page.once("dialog", dialog => dialog.accept());
+      await page.getByRole("button", { name, exact: true }).click();
+      await expect(page.getByRole("alert")).toHaveText("Receipt changed");
+      await expect(page.getByLabel("Shop / merchant")).toHaveValue("Local unsaved draft");
+    }
+    page.once("dialog", dialog => dialog.accept());
+    await page.getByRole("button", { name: "Refresh latest version", exact: true }).click();
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue("Changed in another tab");
+    deleteGate = new Promise(resolve => { releaseDelete = resolve; });
+    page.once("dialog", dialog => dialog.accept());
+    await page.getByRole("button", { name: "Delete receipt", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Deleting…", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "← All receipts", exact: true }).click();
+    await page.locator(".receipt-row").filter({ hasText: "Second receipt" }).click();
+    await page.getByLabel("Shop / merchant").fill("Keep this other draft");
+    const response = page.waitForResponse(response => response.request().method() === "DELETE");
+    releaseDelete!();
+    await response;
+    await page.clock.runFor(100);
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue("Keep this other draft");
+    // Navigation still guards the second receipt's unsaved state.
+    const dialog = page.waitForEvent("dialog");
+    const navigation = page.getByRole("button", { name: "Receipts", exact: true }).click();
+    await (await dialog).dismiss();
+    await navigation;
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue("Keep this other draft");
+    await page.close();
+    console.info("UI receipt race checks passed: dirty-draft revisions and delayed deletion after navigation.");
   }
   // Redesign coverage uses fresh pages and independent fixtures at each viewport.
   const screenshotDir = process.env.UI_SCREENSHOT_DIR;

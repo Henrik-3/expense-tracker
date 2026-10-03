@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { dateSchema, decimalSchema, extractionSchema } from "../src/shared/contracts";
+import { dateSchema, decimalSchema, extractionSchema, receiptRevisionSchema } from "../src/shared/contracts";
 import { loadConfig } from "../src/server/config";
 
 describe("shared boundaries", () => {
+  test("receipt actions require an explicit nonnegative integer revision", () => {
+    for (const revision of [0, 1, 42]) {
+      expect(receiptRevisionSchema.parse({ revision })).toEqual({ revision });
+    }
+    for (const input of [{}, null, { revision: -1 }, { revision: 0.5 }, { revision: "1" }, { revision: null }]) {
+      expect(receiptRevisionSchema.safeParse(input).success).toBe(false);
+    }
+  });
   test("decimal strings preserve fractions, negatives and database precision", () => {
     for (const value of ["0", "-1.25", "0.125", "9999999999.9999"]) {
       expect(decimalSchema.safeParse(value).success).toBe(true);

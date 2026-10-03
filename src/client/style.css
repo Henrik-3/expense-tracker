@@ -41,6 +41,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .primary { background: var(--green); color: #002e22; border-color: var(--green); }
 .primary:hover { background: #19e18d; border-color: #19e18d; }
 .quiet { background: transparent; border-color: transparent; color: #466959; }
+.danger { color: #a32d32; border-color: #e3b8ba; }
+.danger:hover { background: #fff0f0; border-color: #c58286; }
 .icon { width: 21px; height: 21px; flex-shrink: 0; vertical-align: middle; }
 .layout { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100dvh; }
 .sidebar {
