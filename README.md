@@ -57,6 +57,41 @@ If AI credentials/model are absent, uploads are still accepted and safely queued
 The capture page displays a setup notice. Set the variables and recreate the app
 container (`docker compose up -d app`) to begin processing.
 
+### Pull a prebuilt image from GitHub
+
+The **Publish Docker image** GitHub Actions workflow builds the existing
+Dockerfile and publishes a Linux AMD64 image to
+`ghcr.io/henrik-3/expense-tracker`. It runs on pushes to `master`, version tags
+matching `v*`, and manually through the Actions tab. Default-branch builds
+publish `latest`; version tags publish their exact name (for example `v1.0.0`).
+Every build also publishes a `sha-<short-commit>` tag.
+
+Publishing uses GitHub's automatic `GITHUB_TOKEN` with `packages: write`;
+no additional repository secret is needed. After the first successful run,
+make the package public in its GitHub package settings if you want anonymous
+pulls. For a private package, log in with a GitHub personal access token
+(classic) with `read:packages` and access to the package, supplied through
+`docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin`.
+Never put the token in a committed file.
+
+To pull just the image:
+
+```sh
+docker pull ghcr.io/henrik-3/expense-tracker:latest
+```
+
+To run it with PostgreSQL and the existing persistent volumes, configure `.env`
+as above, then use the Compose override instead of building locally:
+
+```sh
+docker compose -f compose.yaml -f compose.ghcr.yaml up -d --no-build --pull always
+```
+
+Use the same two `-f` arguments for subsequent Compose commands. To deploy a
+specific version, set `APP_IMAGE=ghcr.io/henrik-3/expense-tracker:v1.0.0` in
+your private `.env` (using a tag that has been published). Forks publish under
+their own lowercased `ghcr.io/owner/repository` path; adjust `APP_IMAGE` accordingly.
+
 ### Reverse proxy
 
 TLS termination and authentication belong at the reverse proxy. Preserve the

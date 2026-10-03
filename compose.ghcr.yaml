@@ -1,0 +1,4 @@
+# Use with compose.yaml and --no-build to run the published image.
+services:
+  app:
+    image: ${APP_IMAGE:-ghcr.io/henrik-3/expense-tracker:latest}
