@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import { createDatabase } from "../src/server/db";
@@ -9,7 +9,7 @@ import { categories, jobs, receipts, merchantRules, extractionRuns, receiptItems
 import { loadConfig } from "../src/server/config";
 import { createServer } from "../src/server/server";
 import { processOneJob } from "../src/server/worker";
-import type { Extraction, ReceiptDetail, ReceiptUpdate, StatsResponse } from "../src/shared/contracts";
+import type { Extraction, ReceiptDetail, ReceiptListResponse, ReceiptUpdate, StatsResponse } from "../src/shared/contracts";
 
 // Use a dedicated test database. No live provider calls or credentials are used.
 const url = process.env.TEST_DATABASE_URL;
@@ -87,6 +87,125 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
   const detectionFetch = (async () => Response.json({
     choices: [{ message: { content: JSON.stringify(detected) } }],
   })) as unknown as typeof fetch;
+
+  const review = (id: string, body: unknown) => request(`/api/receipts/${id}/review`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  test("review is persistent, revision-locked, independent of extraction, and reset on enqueue", async () => {
+    const receiptId = randomUUID();
+    receiptIds.push(receiptId);
+    const uploaded = await upload(receiptId);
+    const initial: ReceiptDetail = (await uploaded.json()).receipt;
+    expect(initial.reviewed).toBe(false);
+    expect(await getReceipt(receiptId)).toEqual(initial); // Viewing is not reviewing.
+    expect((await review(receiptId, { revision: initial.revision, reviewed: true })).status).toBe(409);
+    await database.db.update(receipts).set({ status: "processing" }).where(eq(receipts.id, receiptId));
+    expect((await review(receiptId, { revision: initial.revision, reviewed: false })).status).toBe(409);
+    await database.db.update(receipts).set({ status: "needs_review", warnings: ["Check amount"] }).where(eq(receipts.id, receiptId));
+    const before = await getReceipt(receiptId);
+    const response = await review(receiptId, { revision: before.revision, reviewed: true });
+    expect(response.status).toBe(200);
+    const marked: ReceiptDetail = (await response.json()).receipt;
+    expect(marked).toEqual({ ...before, reviewed: true, revision: before.revision + 1, updatedAt: marked.updatedAt });
+    expect(await getReceipt(receiptId)).toEqual(marked);
+    const noop = await review(receiptId, { revision: marked.revision, reviewed: true });
+    expect((await noop.json()).receipt).toEqual(marked);
+    expect((await review(receiptId, { revision: before.revision, reviewed: true })).status).toBe(409);
+    expect((await patch(receiptId, { ...update(before), status: "needs_review" })).status).toBe(409);
+    const editedResponse = await patch(receiptId, { ...update(marked), status: "needs_review", notes: "Manual notes" });
+    expect(editedResponse.status).toBe(200);
+    const edited: ReceiptDetail = (await editedResponse.json()).receipt;
+    expect(edited.reviewed).toBe(true);
+    const unmarkedResponse = await review(receiptId, { revision: edited.revision, reviewed: false });
+    const unmarked: ReceiptDetail = (await unmarkedResponse.json()).receipt;
+    expect(unmarked.reviewed).toBe(false);
+    expect(unmarked.revision).toBe(edited.revision + 1);
+    const remark = await review(receiptId, { revision: unmarked.revision, reviewed: true });
+    const remarked: ReceiptDetail = (await remark.json()).receipt;
+    const redetect = await action(receiptId, "POST", { revision: remarked.revision }, "/redetect");
+    expect(redetect.status).toBe(200);
+    const queued: ReceiptDetail = (await redetect.json()).receipt;
+    expect(queued.reviewed).toBe(false);
+    expect(queued.revision).toBe(remarked.revision + 1);
+    expect(queued.notes).toBe(edited.notes);
+    await processOneJob(database.db, config, detectionFetch);
+    const completed = await getReceipt(receiptId);
+    expect(completed.reviewed).toBe(false);
+    const racing = await Promise.all([
+      review(receiptId, { revision: completed.revision, reviewed: true }),
+      review(receiptId, { revision: completed.revision, reviewed: true }),
+    ]);
+    expect(racing.map((response) => response.status).sort()).toEqual([200, 409]);
+    const markedAgain: ReceiptDetail = (await racing.find((response) => response.status === 200)!.json()).receipt;
+    expect(markedAgain).toEqual({ ...completed, reviewed: true, revision: completed.revision + 1, updatedAt: markedAgain.updatedAt });
+    await database.db.update(receipts).set({ status: "failed", error: "Extraction failed" }).where(eq(receipts.id, receiptId));
+    const failed = await getReceipt(receiptId);
+    const retry = await request(`/api/receipts/${receiptId}/retry`, { method: "POST" });
+    expect(retry.status).toBe(200);
+    const retried: ReceiptDetail = (await retry.json()).receipt;
+    expect(retried.reviewed).toBe(false);
+    expect(retried.revision).toBe(failed.revision + 1);
+    await processOneJob(database.db, config, detectionFetch);
+  });
+
+  test("review migration backfills existing receipts and defaults new rows to false", async () => {
+    const source = await readFile(new URL("../src/server/db/migrations/003_receipt_review.sql", import.meta.url), "utf8");
+    await database.sql.begin(async (tx) => {
+      // A transaction-local table shadows the real receipts table; applying the
+      // actual migration here exercises upgrades without rewriting shared schema.
+      await tx`CREATE TEMPORARY TABLE receipts (id integer PRIMARY KEY) ON COMMIT DROP`;
+      await tx`INSERT INTO receipts (id) VALUES (1)`;
+      await tx.unsafe(source);
+      await tx`INSERT INTO receipts (id) VALUES (2)`;
+      const rows = await tx<{ id: number; reviewed: boolean }[]>`SELECT id, reviewed FROM receipts ORDER BY id`;
+      expect([...rows]).toEqual([
+        { id: 1, reviewed: false }, { id: 2, reviewed: false },
+      ]);
+    });
+  });
+
+  test("receipt lists filter rows and totals before pagination without changing review", async () => {
+    const ids = [randomUUID(), randomUUID(), randomUUID()];
+    receiptIds.push(...ids);
+    await database.db.insert(receipts).values(ids.map((id, index) => ({
+      id, status: "ready" as const, reviewed: index !== 1,
+      createdAt: new Date(`2099-01-0${index + 1}T00:00:00Z`),
+      imagePath: `${id}.png`, imageMime: "image/png", imageSha256: id, originalFilename: "receipt.png",
+    })));
+    const list = async (query: string): Promise<ReceiptListResponse> => {
+      const response = await request(`/api/receipts?${query}`);
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    const all = await list("limit=100");
+    const reviewed = await list("reviewed=true&limit=100");
+    const unreviewed = await list("reviewed=false&limit=100");
+    expect(reviewed.total + unreviewed.total).toBe(all.total);
+    expect(reviewed.receipts.every((receipt) => receipt.reviewed)).toBe(true);
+    expect(unreviewed.receipts.every((receipt) => !receipt.reviewed)).toBe(true);
+    const page = await list("reviewed=true&limit=1&offset=1");
+    expect(page.total).toBe(reviewed.total);
+    expect(page.receipts.map((receipt) => receipt.id)).toEqual([ids[0]!]);
+    const falsePage = await list("reviewed=false&limit=1");
+    expect(falsePage.total).toBe(unreviewed.total);
+    expect(falsePage.receipts.map((receipt) => receipt.id)).toEqual([ids[1]!]);
+    expect((await list("reviewed=true&offset=1000000")).receipts).toEqual([]);
+    expect((await getReceipt(ids[0]!)).reviewed).toBe(true);
+    expect((await getReceipt(ids[1]!)).reviewed).toBe(false);
+    expect((await request("/api/receipts?reviewed=yes")).status).toBe(400);
+  });
+
+  test("review actions validate bodies, identifiers, and missing receipts", async () => {
+    const missingId = randomUUID();
+    expect((await review(missingId, { revision: 0, reviewed: true })).status).toBe(404);
+    expect((await review("invalid", { revision: 0, reviewed: true })).status).toBe(400);
+    for (const body of [{ revision: 0 }, { reviewed: false }, { revision: -1, reviewed: true }, { revision: 1.5, reviewed: true }, { revision: "0", reviewed: true }, { revision: 0, reviewed: "false" }]) {
+      expect((await review(missingId, body)).status).toBe(400);
+    }
+    expect((await request(`/api/receipts/${missingId}/review`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: "{",
+    })).status).toBe(400);
+  });
 
   test("capture, durable extraction, corrections, and item-level statistics", async () => {
     const receiptId = randomUUID();

@@ -21,7 +21,7 @@ function fixture(): ReceiptDetail {
   return {
     id: receiptId, merchantName: "REWE Viettz ihr Frischemarkt", merchantGroup: "REWE",
     purchasedAt: "2026-06-01", currency: "EUR", total: "25.00", notes: "",
-    status: "ready", revision: 0, warnings: [], error: null,
+    status: "ready", revision: 0, warnings: [], error: null, reviewed: false,
     createdAt: "2026-06-01T12:00:00Z", updatedAt: "2026-06-01T12:00:00Z",
     imageUrl: `/api/receipts/${receiptId}/image`, adjustments: [],
     items: Array.from({ length: 25 }, (_, index) => ({
@@ -36,7 +36,7 @@ const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQ
 const receipt: ReceiptDetail = {
   id: "11111111-1111-4111-8111-111111111111", merchantName: "The Daily Coffee", merchantGroup: "The Daily Coffee",
   purchasedAt: "2026-06-01", currency: "EUR", total: "7.50", notes: "",
-  status: "ready", warnings: [], error: null, revision: 1,
+  status: "ready", warnings: [], error: null, revision: 1, reviewed: false,
   createdAt: "2026-06-01T10:00:00Z", updatedAt: "2026-06-01T10:00:00Z",
   imageUrl: "/api/receipts/example/image",
   items: [{ id: "item-1", description: "Coffee and croissant", productName: null,
@@ -77,6 +77,7 @@ try {
     let deleted = false;
     let redetectCalls = 0;
     let deleteCalls = 0;
+    let reviewCalls = 0;
     let actionError: string | undefined;
     let rules: MerchantRule[] = [{ id: ruleId, matchName: "REWE", merchantName: "REWE", matchType: "prefix" }];
     let categories = [{ id: categoryId, name: "Groceries", archived: false }];
@@ -112,12 +113,25 @@ try {
         receipt.merchantGroup = rule.merchantName;
         return respond({ rule });
       }
-      if (path === "/api/receipts") return respond({ receipts: deleted ? [] : [receipt], total: deleted ? 0 : 1 });
+      if (path === "/api/receipts") {
+        const reviewed = new URL(route.request().url()).searchParams.get("reviewed");
+        const rows = deleted || (reviewed !== null && reviewed !== String(receipt.reviewed)) ? [] : [receipt];
+        return respond({ receipts: rows, total: rows.length });
+      }
+      if (path === `/api/receipts/${receiptId}/review` && method === "PATCH") {
+        reviewCalls++;
+        const input = route.request().postDataJSON();
+        expect(input.revision).toBe(receipt.revision);
+        expect(typeof input.reviewed).toBe("boolean");
+        if (actionError) return respond({ error: actionError }, 409);
+        receipt = { ...receipt, reviewed: input.reviewed, revision: receipt.revision + 1 };
+        return respond({ receipt });
+      }
       if (path === `/api/receipts/${receiptId}/redetect`) {
         redetectCalls++;
         expect(route.request().postDataJSON()).toEqual({ revision: receipt.revision });
         if (actionError) return respond({ error: actionError }, 409);
-        receipt = { ...receipt, revision: receipt.revision + 1, status: "queued" };
+        receipt = { ...receipt, revision: receipt.revision + 1, status: "queued", reviewed: false };
         return respond({ receipt });
       }
       if (path.endsWith("/image")) return route.fulfill({
@@ -157,6 +171,34 @@ try {
     await page.getByRole("button", { name: "Receipts", exact: true }).click();
     await expect(page.locator(".receipt-row strong").first()).toHaveText("REWE");
     await expect(page.locator(".receipt-row")).toContainText("REWE Viettz ihr Frischemarkt");
+    await expect(page.locator(".receipt-row .review-badge")).toHaveText("Not reviewed");
+    await page.getByLabel("Review status").selectOption("false");
+    await page.locator(".receipt-row").click();
+    await expect(page.getByRole("button", { name: "Mark as reviewed", exact: true })).toBeEnabled();
+    expect(reviewCalls).toBe(0); // Merely opening never clears the review queue.
+    actionError = "Receipt changed or is being processed";
+    await page.getByRole("button", { name: "Mark as reviewed", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Refresh latest version" })).toBeVisible();
+    await expect(page.locator(".review-controls .badge")).toHaveText("Not reviewed");
+    actionError = undefined;
+    await page.getByRole("button", { name: "Refresh latest version" }).click();
+    await page.getByRole("button", { name: "Mark as reviewed", exact: true }).click();
+    await expect(page.locator(".review-controls .badge")).toHaveText("Reviewed");
+    await page.getByRole("button", { name: "← All receipts" }).click();
+    await expect(page.getByLabel("Review status")).toHaveValue("false");
+    await expect(page.getByRole("heading", { name: "All caught up" })).toBeVisible();
+    await expect(page.getByText("0 matching receipts")).toBeVisible();
+    await page.getByLabel("Review status").selectOption("true");
+    await expect(page.locator(".receipt-row .review-badge")).toHaveText("Reviewed");
+    await page.reload();
+    await page.getByRole("button", { name: "Receipts", exact: true }).click();
+    await expect(page.locator(".receipt-row .review-badge")).toHaveText("Reviewed");
+    await page.locator(".receipt-row").click();
+    await page.getByRole("button", { name: "Mark as not reviewed", exact: true }).click();
+    await expect(page.locator(".review-controls .badge")).toHaveText("Not reviewed");
+    expect(reviewCalls).toBe(3);
+    await noOverflow(page);
+    await page.getByRole("button", { name: "← All receipts" }).click();
     await page.locator(".receipt-row").click();
     await expect(page.locator(".line-item-summary")).toHaveCount(25);
     await expect(page.getByLabel("Description", { exact: true })).toHaveCount(0);
@@ -167,6 +209,7 @@ try {
     await first.getByRole("button", { name: /Edit item 1$/ }).focus();
     await page.keyboard.press("Enter");
     await first.getByLabel("Brand", { exact: true }).fill("Edited brand");
+    await expect(page.getByRole("button", { name: "Mark as reviewed", exact: true })).toBeDisabled();
     await first.getByLabel("Category", { exact: true }).selectOption(categoryId);
     await first.getByRole("button", { name: /Collapse item 1$/ }).click();
     await expect(first).toContainText("Groceries");
@@ -184,6 +227,7 @@ try {
     await added.getByLabel("Line subtotal", { exact: true }).fill("1.00");
     await page.getByRole("button", { name: "Save · Needs review", exact: true }).click();
     await expect(page.getByText("Saved for review. Check any warnings before marking ready.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Mark as reviewed", exact: true })).toBeEnabled();
     expect(saved?.items).toHaveLength(25);
     expect(saved?.items[0]?.manufacturer).toBe("Preserved manufacturer");
     expect(saved?.items[24]?.description).toBe("New product");

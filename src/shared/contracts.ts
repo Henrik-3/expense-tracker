@@ -47,6 +47,10 @@ export const receiptRevisionSchema = z.object({
   revision: z.number().int().nonnegative(),
 });
 export type ReceiptRevision = z.infer<typeof receiptRevisionSchema>;
+export const receiptReviewSchema = receiptRevisionSchema.extend({
+  reviewed: z.boolean(),
+});
+export type ReceiptReview = z.infer<typeof receiptReviewSchema>;
 export interface ReceiptDeleteResponse {
   deleted: true;
   imageCleanup: "removed" | "failed";
@@ -56,6 +60,7 @@ export interface ReceiptSummary extends z.infer<typeof receiptFieldsSchema> {
   merchantGroup: string | null;
   id: string;
   status: ReceiptStatus;
+  reviewed: boolean;
   warnings: string[];
   error: string | null;
   revision: number;
@@ -117,15 +122,19 @@ export interface StatsResponse {
 }
 
 // HTTP contract:
-// GET /api/receipts?limit=50&offset=0 -> ReceiptListResponse
+// GET /api/receipts?limit=50&offset=0&reviewed=true|false -> ReceiptListResponse
 // POST /api/receipts (multipart: image File, receiptId client UUID) -> { receipt: ReceiptDetail }
 // GET /api/receipts/:id -> { receipt: ReceiptDetail }
 // PATCH /api/receipts/:id (ReceiptUpdate) -> { receipt: ReceiptDetail }
+// PATCH /api/receipts/:id/review (ReceiptReview) -> { receipt: ReceiptDetail }
+// Review changes reject stale/queued/processing receipts and increment revision
+// only when the flag changes. Reads and normal edits preserve the flag.
 // POST /api/receipts/:id/retry -> { receipt: ReceiptDetail }
 // POST /api/receipts/:id/redetect (ReceiptRevision) -> { receipt: ReceiptDetail }
 // DELETE /api/receipts/:id (ReceiptRevision) -> ReceiptDeleteResponse
 // Redetect/retry reserve a new revision at enqueue, keep extracted data until
-// success, and preserve notes. Redetect rejects queued/processing receipts.
+// success, preserve notes, and reset reviewed to false at enqueue.
+// Redetect rejects queued/processing receipts.
 // Delete supports every status and cascades related data. imageCleanup: "failed"
 // still means the database deletion committed; the logged orphan requires
 // operator cleanup (no automatic retry). Already-missing images count as removed.

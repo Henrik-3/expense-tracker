@@ -2,7 +2,7 @@ import React, { Component, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Button, Fieldset, Legend, Select, Textarea, Tab, TabGroup, TabList, TabPanel, TabPanels } from "@headlessui/react";
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { receiptUpdateSchema, type ReceiptDetail, type ReceiptUpdate, type ReceiptDeleteResponse, type ReceiptListResponse, type Category, type StatsResponse, type Breakdown } from "../shared/contracts";
+import { receiptUpdateSchema, type ReceiptDetail, type ReceiptUpdate, type ReceiptReview, type ReceiptDeleteResponse, type ReceiptListResponse, type Category, type StatsResponse, type Breakdown } from "../shared/contracts";
 import { createUploadId } from "./upload-id";
 import { api, json, RequestError } from "./api";
 import { ErrorMessage, Field, Toggle } from "./ui";
@@ -83,12 +83,15 @@ function Capture({ open }: { open: (id: string) => void }) {
     </article>)}</div>
   </section>;
 }
-function Receipts({ open }: { open: (id: string) => void }) {
-  const query = useInfiniteQuery({ queryKey: ["receipts"], initialPageParam: 0, queryFn: ({ pageParam }) => api<ReceiptListResponse>(`/receipts?limit=30&offset=${pageParam}`), getNextPageParam: (last, pages) => { const count = pages.reduce((n, p) => n + p.receipts.length, 0); return count < last.total ? count : undefined; }, refetchInterval: q => q.state.data?.pages.some(p => p.receipts.some(r => busy(r.status))) ? 2500 : false });
+type ReviewFilter = "" | "false" | "true";
+function Receipts({ open, reviewFilter, setReviewFilter }: { open: (id: string) => void; reviewFilter: ReviewFilter; setReviewFilter: (value: ReviewFilter) => void }) {
+  const query = useInfiniteQuery({ queryKey: ["receipts", reviewFilter], initialPageParam: 0, queryFn: ({ pageParam }) => api<ReceiptListResponse>(`/receipts?limit=30&offset=${pageParam}${reviewFilter ? `&reviewed=${reviewFilter}` : ""}`), getNextPageParam: (last, pages) => { const count = pages.reduce((n, p) => n + p.receipts.length, 0); return count < last.total ? count : undefined; }, refetchInterval: q => q.state.data?.pages.some(p => p.receipts.some(r => busy(r.status))) ? 2500 : false });
   const rows = query.data?.pages.flatMap(p => p.receipts) || [];
   return <section><div className="page-heading"><div><div className="eyebrow">YOUR PAPER TRAIL, SIMPLIFIED</div><h1>Receipts</h1><p className="muted">All the little details, together in one place.</p></div><Button disabled={query.isFetching} onClick={() => void query.refetch()}>{query.isFetching ? "Refreshing…" : "Refresh"}</Button></div><ErrorMessage error={query.error} />
-    {query.isPending && <p role="status">Loading receipts…</p>}{!query.isPending && !query.error && !rows.length && <div className="empty"><h2>A clean slate</h2><p>Capture your first receipt to start your ledger.</p></div>}
-    {!!rows.length && <div className="receipt-list"><div className="list-heading" aria-hidden="true"><span>Merchant / date</span><span>Status</span><span>Amount</span></div>{rows.map(r => <Button className="receipt-row" key={r.id} onClick={() => open(r.id)}><span className="receipt-icon"><Icon name="receipts" /></span><span className="receipt-merchant"><strong>{r.merchantGroup || r.merchantName || "Untitled receipt"}</strong>{r.merchantGroup && r.merchantGroup !== r.merchantName && <small>{r.merchantName}</small>}<small>{r.purchasedAt || `Added ${new Date(r.createdAt).toLocaleDateString()}`}</small></span><span className={`badge ${r.status}`}>{label(r.status)}</span><strong className="receipt-amount">{money(r.total, r.currency)}</strong><Icon name="arrow" /></Button>)}</div>}
+    <div className="review-filter"><label className="field">Review status<Select value={reviewFilter} onChange={event => setReviewFilter(event.target.value as ReviewFilter)}><option value="">All receipts</option><option value="false">Not reviewed</option><option value="true">Reviewed</option></Select></label>{query.data && <span className="muted small" role="status">{query.data.pages[0]!.total} matching receipts</span>}</div>
+    <p className="muted small">Opening a receipt won’t mark it reviewed. Mark it after checking the details; this is separate from extraction status.</p>
+    {query.isPending && <p role="status">Loading receipts…</p>}{!query.isPending && !query.error && !rows.length && <div className="empty"><h2>{reviewFilter === "false" ? "All caught up" : reviewFilter === "true" ? "No reviewed receipts yet" : "A clean slate"}</h2><p>{reviewFilter === "false" ? "No receipts are waiting for your review." : reviewFilter === "true" ? "Open a receipt and mark it as reviewed after checking it." : "Capture your first receipt to start your ledger."}</p></div>}
+    {!!rows.length && <div className="receipt-list"><div className="list-heading" aria-hidden="true"><span>Merchant / date</span><span>Extraction</span><span>Amount</span></div>{rows.map(r => <Button className="receipt-row" key={r.id} onClick={() => open(r.id)}><span className="receipt-icon"><Icon name="receipts" /></span><span className="receipt-merchant"><strong>{r.merchantGroup || r.merchantName || "Untitled receipt"}</strong>{r.merchantGroup && r.merchantGroup !== r.merchantName && <small>{r.merchantName}</small>}<small>{r.purchasedAt || `Added ${new Date(r.createdAt).toLocaleDateString()}`}</small><span className={`badge review-badge ${r.reviewed ? "" : "unreviewed"}`}>{r.reviewed ? "Reviewed" : "Not reviewed"}</span></span><span className={`badge ${r.status}`}>{label(r.status)}</span><strong className="receipt-amount">{money(r.total, r.currency)}</strong><Icon name="arrow" /></Button>)}</div>}
     {query.hasNextPage && <Button disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>{query.isFetchingNextPage ? "Loading…" : "Load more"}</Button>}
   </section>;
 }
@@ -110,6 +113,15 @@ function Detail({ id, back, onDirty }: { id: string; back: () => void; onDirty: 
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
+  const review = useMutation({
+    mutationFn: (value: ReceiptReview) => api<{ receipt: ReceiptDetail }>(`/receipts/${id}/review`, json(value, "PATCH")),
+    onSuccess: async result => {
+      await qc.cancelQueries({ queryKey: ["receipt", id] });
+      qc.setQueryData(["receipt", id], result);
+      void qc.invalidateQueries({ queryKey: ["receipts"] });
+      setMessage(result.receipt.reviewed ? "Marked as reviewed." : "Marked as not reviewed.");
+    },
+  });
   const mutation = useMutation({ mutationFn: (value: ReceiptUpdate) => api<{ receipt: ReceiptDetail }>(`/receipts/${id}`, json(value, "PATCH")), onSuccess: result => { setDirty(false); setDraft(draftOf(result.receipt)); qc.setQueryData(["receipt", id], result); void qc.invalidateQueries({ queryKey: ["receipts"] }); void qc.invalidateQueries({ queryKey: ["stats"] }); setMessage(result.receipt.status === "ready" ? "Saved as ready." : "Saved for review. Check any warnings before marking ready."); } });
   const redetect = useMutation({
     mutationFn: (revision: number) => api<{ receipt: ReceiptDetail }>(`/receipts/${id}/redetect`, json({ revision })),
@@ -135,28 +147,31 @@ function Detail({ id, back, onDirty }: { id: string; back: () => void; onDirty: 
   });
   const edit = (patch: Partial<ReceiptDraft>) => { setDraft(d => d ? { ...d, ...patch } : d); setDirty(true); setMessage(""); };
   function save(status: ReceiptUpdate["status"]) { if (!draft) return; const result = receiptUpdateSchema.safeParse({ ...draft, status }); if (!result.success) { setValidation(result.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ")); return; } setValidation(""); mutation.mutate(result.data); }
-  const actionPending = mutation.isPending || redetect.isPending || deletion.isPending;
+  const actionPending = mutation.isPending || redetect.isPending || deletion.isPending || review.isPending;
   const locked = !receipt || busy(receipt.status) || actionPending;
-  const actionError = redetect.error || deletion.error;
+  const actionError = redetect.error || deletion.error || review.error;
   return <section><Button className="quiet" onClick={() => { if (!dirty || window.confirm("Leave without saving your edits?")) back(); }}>← All receipts</Button><h1>Receipt details</h1><ErrorMessage error={query.error} />
     {query.isPending && <p role="status">Loading receipt…</p>}
     {receipt && draft && <><div className="section-heading"><span className={`badge ${receipt.status}`}>{label(receipt.status)}</span><span className="muted">Revision {receipt.revision}{dirty ? " · Unsaved changes" : ""}</span></div>
+      <div className="review-controls"><span className={`badge ${receipt.reviewed ? "" : "unreviewed"}`}>{receipt.reviewed ? "Reviewed" : "Not reviewed"}</span><Button disabled={locked || dirty} onClick={() => {
+        redetect.reset(); deletion.reset(); setMessage(""); review.mutate({ revision: receipt.revision, reviewed: !receipt.reviewed });
+      }}>{review.isPending ? "Updating review…" : receipt.reviewed ? "Mark as not reviewed" : "Mark as reviewed"}</Button><span className="muted small">{dirty ? "Save your edits before changing review status." : "Mark as reviewed after checking the extracted details."}</span></div>
       <div className="actions">
         <Button disabled={locked} onClick={() => {
           if (window.confirm("Redetect this receipt from the original image? Successful extraction will replace detected details, including manual corrections. Saved notes will be kept. Unsaved changes will be discarded.")) {
-            deletion.reset(); setMessage(""); redetect.mutate(draft.revision);
+            deletion.reset(); review.reset(); setMessage(""); redetect.mutate(draft.revision);
           }
         }}>{redetect.isPending ? "Queuing redetection…" : "Redetect receipt"}</Button>
         <Button className="danger" disabled={actionPending} onClick={() => {
           if (window.confirm("Permanently delete this receipt and its original image? All details and any unsaved changes will be lost. This cannot be undone.")) {
-            redetect.reset(); setMessage(""); deletion.mutate(draft.revision);
+            redetect.reset(); review.reset(); setMessage(""); deletion.mutate(draft.revision);
           }
         }}>{deletion.isPending ? "Deleting…" : "Delete receipt"}</Button>
       </div>
       <ErrorMessage error={actionError} />
       {actionError instanceof RequestError && actionError.status === 409 && <p className="notice">This receipt changed on the server. Your edits are still here. <Button onClick={async () => {
         if (!dirty || window.confirm("Discard your edits and load the latest version?")) {
-          redetect.reset(); deletion.reset(); setDirty(false); await query.refetch();
+          redetect.reset(); deletion.reset(); review.reset(); setDirty(false); await query.refetch();
         }
       }}>Refresh latest version</Button> before trying again.</p>}
       {busy(receipt.status) && <p className="notice" role="status">Your receipt is saved. We’re extracting its details in the background. Editing will become available when processing finishes.</p>}
@@ -217,11 +232,12 @@ class Boundary extends Component<{ children: React.ReactNode }, { failed: boolea
 }
 function App() {
   const [page, setPage] = useState("capture"); const [id, setId] = useState<string | null>(null);
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("");
   const [dirty, setDirty] = useState(false);
   function navigate(next: string) { if (dirty && !window.confirm("Leave without saving your edits?")) return; setPage(next); setId(null); }
   return <><a className="skip-link" href="#main">Skip to content</a><div className="layout"><aside className="sidebar"><a className="logo" href="#capture" onClick={e => { e.preventDefault(); navigate("capture"); }}><span className="logo-mark"><Icon name="receipts" /></span><span>receipt<span className="logo-light">ledger</span></span></a><div className="workspace"><span className="workspace-avatar">P</span><div><strong>Personal workspace</strong><small>Your everyday expenses</small></div></div><div className="nav-label">WORKSPACE</div><nav aria-label="Main navigation">{([["capture", "Capture"], ["receipts", "Receipts"], ["stats", "Insights"], ["settings", "Settings"]] as const).map(([key, title]) => <Button key={key} className={page === key ? "active" : ""} aria-current={page === key ? "page" : undefined} onClick={() => navigate(key)}><Icon name={key === "settings" ? "categories" : key} />{title}</Button>)}</nav><div className="sidebar-bottom"><Icon name="shield" /><div><strong>Your ledger. Your server.</strong><p>Self-hosted receipt storage.<br />AI extraction uses your provider.</p></div></div></aside><div className="main-column"><header className="topbar"><span>Personal workspace <span className="breadcrumb-divider">/</span> <strong>{id ? "Receipt details" : ({ capture: "Capture", receipts: "Receipts", stats: "Insights", settings: "Settings" })[page]}</strong></span><span className="profile-avatar" aria-label="Personal workspace">P</span></header><main id="main" tabIndex={-1}>
     <div hidden={page !== "capture" || id !== null}><Capture open={value => { setPage("receipts"); setId(value); }} /></div>
-    {page === "receipts" && (id ? <Detail key={id} id={id} back={() => setId(null)} onDirty={setDirty} /> : <Receipts open={setId} />)}{page === "stats" && <Stats />}{page === "settings" && <Settings />}
+    {page === "receipts" && (id ? <Detail key={id} id={id} back={() => setId(null)} onDirty={setDirty} /> : <Receipts open={setId} reviewFilter={reviewFilter} setReviewFilter={setReviewFilter} />)}{page === "stats" && <Stats />}{page === "settings" && <Settings />}
     <footer><span>Receipt Ledger</span><span>Keep the details. Lose the paperwork.</span></footer></main></div></div></>;
 }
 createRoot(document.getElementById("root")!).render(<React.StrictMode><Boundary><QueryClientProvider client={client}><App /></QueryClientProvider></Boundary></React.StrictMode>);

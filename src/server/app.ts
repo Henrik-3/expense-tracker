@@ -8,19 +8,19 @@ import { resolve, basename } from "node:path";
 import type { Database } from "./db";
 import type { Config } from "./config";
 import { receipts, receiptItems, receiptAdjustments, jobs, categories, merchantRules } from "./db/schema";
-import { receiptUpdateSchema, receiptRevisionSchema, categoryInputSchema, merchantRuleInputSchema, type ReceiptDetail } from "../shared/contracts";
+import { receiptUpdateSchema, receiptRevisionSchema, receiptReviewSchema, categoryInputSchema, merchantRuleInputSchema, type ReceiptDetail } from "../shared/contracts";
 import { merchantResolver } from "./services/merchant-grouping";
 import { assessExtraction } from "./services/reconciliation";
 import { aggregateStatistics } from "./services/statistics";
 import { writeDurableImage } from "./services/storage";
-import { uuidSchema, paginationSchema, statsQuerySchema, imageMime } from "./api/validation";
+import { uuidSchema, receiptListQuerySchema, statsQuerySchema, imageMime } from "./api/validation";
 import { logEvent } from "./logging";
 
 type Reader = Pick<Database, "select">;
 function fail(status: 400 | 404 | 409 | 413 | 415, message: string): never { throw new HTTPException(status, { message }); }
 function id(value: string) { const parsed = uuidSchema.safeParse(value); if (!parsed.success) fail(400, "Invalid UUID"); return parsed.data; }
 function summary(row: typeof receipts.$inferSelect, resolveMerchant: ReturnType<typeof merchantResolver>) {
-  return { id: row.id, status: row.status, merchantName: row.merchantName, merchantGroup: resolveMerchant(row.merchantName), purchasedAt: row.purchasedAt, currency: row.currency, total: row.total, notes: row.notes, warnings: row.warnings, error: row.error, revision: row.revision, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
+  return { id: row.id, status: row.status, reviewed: row.reviewed, merchantName: row.merchantName, merchantGroup: resolveMerchant(row.merchantName), purchasedAt: row.purchasedAt, currency: row.currency, total: row.total, notes: row.notes, warnings: row.warnings, error: row.error, revision: row.revision, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
 }
 async function detail(db: Reader, receiptId: string): Promise<ReceiptDetail> {
   const resolveMerchant = merchantResolver(await db.select().from(merchantRules));
@@ -44,12 +44,13 @@ export function createApp(db: Database, config: Config) {
   });
   const json = async (c: { req: { json: () => Promise<unknown> } }) => { try { return await c.req.json(); } catch { fail(400, "Invalid JSON"); } };
   app.get("/api/receipts", async (c) => {
-    const query = paginationSchema.safeParse(c.req.query());
-    if (!query.success) fail(400, "Invalid pagination");
+    const query = receiptListQuerySchema.safeParse(c.req.query());
+    if (!query.success) fail(400, "Invalid receipt list query");
     return db.transaction(async (tx) => {
       const resolveMerchant = merchantResolver(await tx.select().from(merchantRules));
-      const rows = await tx.select().from(receipts).orderBy(desc(receipts.createdAt), receipts.id).limit(query.data.limit).offset(query.data.offset);
-      const [total] = await tx.select({ value: count() }).from(receipts);
+      const filter = query.data.reviewed === undefined ? undefined : eq(receipts.reviewed, query.data.reviewed);
+      const rows = await tx.select().from(receipts).where(filter).orderBy(desc(receipts.createdAt), receipts.id).limit(query.data.limit).offset(query.data.offset);
+      const [total] = await tx.select({ value: count() }).from(receipts).where(filter);
       return c.json({ receipts: rows.map((row) => summary(row, resolveMerchant)), total: total!.value });
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
   });
@@ -127,6 +128,21 @@ export function createApp(db: Database, config: Config) {
     });
     return c.json({ receipt });
   });
+  app.patch("/api/receipts/:id/review", async (c) => {
+    const receiptId = id(c.req.param("id"));
+    const parsed = receiptReviewSchema.safeParse(await json(c));
+    if (!parsed.success) fail(400, "Invalid receipt review");
+    const receipt = await db.transaction(async (tx) => {
+      const [current] = await tx.select().from(receipts).where(eq(receipts.id, receiptId)).for("update");
+      if (!current) fail(404, "Receipt not found");
+      if (current.revision !== parsed.data.revision || ["queued", "processing"].includes(current.status)) fail(409, "Receipt changed or is being processed");
+      if (current.reviewed !== parsed.data.reviewed) {
+        await tx.update(receipts).set({ reviewed: parsed.data.reviewed, revision: current.revision + 1, updatedAt: new Date() }).where(eq(receipts.id, receiptId));
+      }
+      return detail(tx, receiptId);
+    });
+    return c.json({ receipt });
+  });
   const enqueue = (receiptId: string, revision?: number) =>
     db.transaction(async (tx) => {
       // Match the worker's jobs-before-receipts locking order.
@@ -141,7 +157,7 @@ export function createApp(db: Database, config: Config) {
       // Reserve a new revision now, rather than at completion, so editors from
       // before this extraction remain stale even after it finishes. Keep all
       // extracted fields, warnings and child records until successful replacement.
-      await tx.update(receipts).set({ status: "queued", revision: row.revision + 1, error: null, updatedAt: new Date() }).where(eq(receipts.id, receiptId));
+      await tx.update(receipts).set({ status: "queued", reviewed: false, revision: row.revision + 1, error: null, updatedAt: new Date() }).where(eq(receipts.id, receiptId));
       const reset = { state: "pending" as const, attempts: 0, availableAt: new Date(), leaseExpiresAt: null, lockedBy: null, lastError: null };
       await tx.insert(jobs).values({ receiptId, ...reset }).onConflictDoUpdate({ target: jobs.receiptId, set: reset });
       return detail(tx, receiptId);

@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { dateSchema, decimalSchema, extractionSchema, receiptRevisionSchema } from "../src/shared/contracts";
+import { dateSchema, decimalSchema, extractionSchema, receiptRevisionSchema, receiptReviewSchema } from "../src/shared/contracts";
 import { loadConfig } from "../src/server/config";
 
 describe("shared boundaries", () => {
+  test("review requires a boolean and an explicit nonnegative integer revision", () => {
+    for (const reviewed of [true, false]) {
+      expect(receiptReviewSchema.parse({ revision: 0, reviewed })).toEqual({ revision: 0, reviewed });
+    }
+    for (const input of [{}, null, { revision: 0 }, { reviewed: true }, { revision: -1, reviewed: true }, { revision: 0.5, reviewed: false }, { revision: "1", reviewed: true }, { revision: 0, reviewed: "false" }, { revision: 0, reviewed: 0 }, { revision: 0, reviewed: null }]) {
+      expect(receiptReviewSchema.safeParse(input).success).toBe(false);
+    }
+  });
   test("receipt actions require an explicit nonnegative integer revision", () => {
     for (const revision of [0, 1, 42]) {
       expect(receiptRevisionSchema.parse({ revision })).toEqual({ revision });

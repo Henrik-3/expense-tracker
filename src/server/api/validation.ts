@@ -5,6 +5,9 @@ export const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).max(1000000).default(0),
 });
+export const receiptListQuerySchema = paginationSchema.extend({
+  reviewed: z.enum(["true", "false"]).optional().transform((value) => value === undefined ? undefined : value === "true"),
+});
 export const statsQuerySchema = z.object({
   from: z.iso.date().optional(),
   to: z.iso.date().optional(),

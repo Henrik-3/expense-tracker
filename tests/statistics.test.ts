@@ -4,7 +4,7 @@ import { aggregateStatistics } from "../src/server/services/statistics";
 
 const receipt = (changes: Partial<ReceiptDetail> = {}): ReceiptDetail => ({
   id: "test", status: "ready", merchantName: "Shop", purchasedAt: "2025-01-05", currency: "EUR", total: "0.3", notes: "", warnings: [], error: null, revision: 0,
-  createdAt: "", updatedAt: "", imageUrl: "", adjustments: [], merchantGroup: null,
+  createdAt: "", updatedAt: "", imageUrl: "", adjustments: [], merchantGroup: null, reviewed: false,
   items: [{ id: "item", description: "Food", productName: null, quantity: "1", unit: null, unitPrice: "0.4", lineTotal: "0.4", categoryId: "food", brand: "Brand", manufacturer: "Maker" }], ...changes,
 });
 describe("exact statistics", () => {

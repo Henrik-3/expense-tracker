@@ -17,6 +17,7 @@ export const merchantRules = pgTable("merchant_rules", {
 export const receipts = pgTable("receipts", {
   id: uuid("id").primaryKey().defaultRandom(),
   status: text("status").$type<ReceiptStatus>().notNull().default("queued"),
+  reviewed: boolean("reviewed").notNull().default(false),
   merchantName: text("merchant_name"),
   purchasedAt: date("purchased_at"),
   currency: text("currency"),

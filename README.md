@@ -116,6 +116,17 @@ calls to a third-party API without that provider's idempotency support.
    start as compact rows with quantity, category, and subtotal. Expand a row to
    edit all its fields; collapsing it retains your draft. New items open for editing.
 5. Choose **Save · Ready** or **Save · Needs review**.
+6. After checking a receipt, choose **Mark as reviewed**. In the receipt list,
+   filter **Review status → Not reviewed** to find the ones you still need to check.
+   The filter stays selected when you return from receipt details.
+
+Review tracking is separate from extraction status: even a `Ready` receipt starts
+as **Not reviewed**. Opening or saving it does not mark it reviewed automatically.
+The flag is saved in the database for the shared ledger, not separately per browser
+or person. You can **Mark as not reviewed** to revisit a receipt. Save unsaved edits
+before changing the flag; queued/processing receipts must finish first.
+Existing receipts start as not reviewed when the migration runs, since previous
+reviews were not tracked. Redetection/retry resets the flag for another check.
 
 `Ready` requires a date, currency, total, at least one line item, known line and
 adjustment amounts, and reconciliation within **0.01 currency units**. AI warnings
@@ -127,6 +138,13 @@ Unknown amounts remain blank/null, never silently zero. Discounts are signed
 negative amounts; deposits/fees have their actual sign. Do not add tax twice.
 Printed descriptions are retained separately from normalized product names.
 Unknown brand/manufacturer stays empty rather than being inferred from a brand.
+
+Purchase dates preserve the receipt's printed local calendar date. The extraction
+prompt never converts it to UTC or the server/browser timezone, even when a
+printed offset would cross midnight in UTC. A missing timezone does not invalidate
+a legible date; genuinely ambiguous dates remain unknown with a warning. The app
+stores dates only, not purchase times or timezone identifiers. These instructions
+apply to new extractions; use **Redetect receipt** to reprocess an existing receipt.
 
 Pending/processing receipts are locked for editing and redetection. On the receipt
 details page, choose **Redetect receipt** to extract again from the original image,

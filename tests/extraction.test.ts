@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import type { Extraction } from "../src/shared/contracts";
+import { extractionSchema, receiptFieldsSchema, type Extraction } from "../src/shared/contracts";
 import { loadConfig } from "../src/server/config";
 import { extractReceipt, ExtractionError, providerSchema } from "../src/server/ai/extractor";
 import { assessExtraction } from "../src/server/services/reconciliation";
@@ -80,6 +80,60 @@ describe("provider protocol", () => {
   });
   test("application schema rejects invalid dates and decimal numbers", async () => {
     await expect(extractReceipt(new Uint8Array(), "image/png", [], config, mockFetch(() => reply(JSON.stringify({ ...valid(), purchasedAt: "2026-02-30", total: 0.3 }))))).rejects.toBeInstanceOf(ExtractionError);
+  });
+  for (const responseFormat of ["json_schema", "json_object"] as const) {
+    test(`${responseFormat}: date-only instructions and safe datetime normalization`, async () => {
+      for (const [purchasedAt, expected] of [
+        ["2026-01-01", "2026-01-01"],
+        [null, null],
+        ["2026-01-01T14:30:00Z", "2026-01-01"],
+        ["2026-01-01T00:30:00+14:00", "2026-01-01"],
+        ["2026-01-01T23:30:00-12:00", "2026-01-01"],
+        ["2026-12-31T23:30:00-12:00", "2026-12-31"],
+        ["2026-03-01T00:30:00+14:00", "2026-03-01"],
+        ["2024-02-29T23:30:00-12:00", "2024-02-29"],
+        ["2026-01-01T14:30:00.123", "2026-01-01"],
+        ["2026-01-01T14:30", "2026-01-01"],
+        [" 2026-01-01 14:30:00 ", "2026-01-01"],
+        ["2024-02-29T14:30:00Z", "2024-02-29"],
+      ]) {
+        const content = JSON.stringify({ ...valid(), purchasedAt });
+        const result = await extractReceipt(new Uint8Array(), "image/png", [],
+          { ...config, ai: { ...config.ai, responseFormat } }, mockFetch((_url, init) => {
+            const prompt = JSON.parse(init!.body as string).messages[0].content;
+            expect(prompt).toContain("purchasedAt must be a calendar date string exactly YYYY-MM-DD");
+            expect(prompt).toContain("without timezone conversion");
+            expect(prompt).toContain("Never include a time or timezone.");
+            expect(prompt).toContain("never convert to UTC, server or browser timezone, or shift the day");
+            expect(prompt).toContain("Do not infer a timezone from currency, upload time, or server location");
+            expect(prompt).toContain("A missing timezone alone does not make a legible local purchase date ambiguous");
+            expect(prompt).toContain("If the purchase date itself is unreadable or genuinely ambiguous, use null and add a warning");
+            expect(prompt).toContain('printed "2026-01-01T00:30:00+14:00" -> "2026-01-01" (not UTC date "2025-12-31")');
+            expect(prompt).toContain('printed "2026-12-31T23:30:00-12:00" -> "2026-12-31" (not UTC date "2027-01-01")');
+            expect(prompt).toContain('printed "2026-06-01 14:30" with no timezone -> "2026-06-01"');
+            expect(prompt).toContain(JSON.stringify(providerSchema));
+            return reply(content);
+          }));
+        expect(result.extraction).toEqual({ ...valid(), purchasedAt: expected });
+        expect(result.raw).toEqual({ choices: [{ message: { content } }] });
+      }
+    });
+  }
+  test("date normalization does not guess or hide invalid timestamps", async () => {
+    for (const purchasedAt of [
+      "01/02/2026", "2026-02-30", "2026-02-30T12:00:00Z", "2025-02-29T12:00:00Z",
+      "2026-01-01T25:00:00Z", "2026-01-01T12:00:00+99:00", "2026-01-01garbage",
+      "2026-01-01T12:00:00Z trailing text", "", 1767225600000, {},
+    ]) {
+      await expect(extractReceipt(new Uint8Array(), "image/png", [], config,
+        mockFetch(() => reply(JSON.stringify({ ...valid(), purchasedAt })))))
+        .rejects.toMatchObject({ diagnostics: { stage: "application_schema" } });
+    }
+  });
+  test("application and editing contracts remain date-only", () => {
+    const extraction = { ...valid(), purchasedAt: "2026-01-01T12:00:00Z" };
+    expect(extractionSchema.safeParse(extraction).success).toBe(false);
+    expect(receiptFieldsSchema.safeParse({ ...extraction, notes: "" }).success).toBe(false);
   });
   test("auth is permanent; throttling/server/network failures retry safely", async () => {
     for (const status of [401, 403, 400, 429, 500]) {

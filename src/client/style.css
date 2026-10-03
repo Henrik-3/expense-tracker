@@ -152,6 +152,10 @@ p { line-height: 1.65; }
 .badge.needs_review, .badge.preview { background: #fff0d4; color: #805914; }
 .badge.failed { background: #ffebe5; color: #a13e2d; }
 .badge.processing, .badge.queued, .badge.uploading { background: #eaf0fb; color: #385e97; }
+.badge.unreviewed { background: #eaf0fb; color: #385e97; }
+.review-badge { margin-top: 8px; }
+.review-filter, .review-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.review-filter .field { width: 220px; max-width: 100%; }
 .error { background: #fff0ed; border: 1px solid #efc8bf; color: #963b30; padding: 13px; border-radius: 8px; overflow-wrap: anywhere; }
 .notice { background: #fcf6e5; border: 1px solid #e9dfbc; color: #6f5c2a; padding: 16px; border-radius: 8px; font-size: 12px; }
 .receipt-list { margin: 20px 0; border: 1px solid var(--line); background: #fff; border-radius: 10px; }
