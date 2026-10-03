@@ -137,6 +137,9 @@ warnings; review the original before marking it ready.
 Unknown amounts remain blank/null, never silently zero. Discounts are signed
 negative amounts; deposits/fees have their actual sign. Do not add tax twice.
 Printed descriptions are retained separately from normalized product names.
+Extraction instructions keep both in the receipt's original language, preserving
+accents, original script, and mixed-language text rather than translating into
+English. Product-name cleanup must not change the language or invent wording.
 Unknown brand/manufacturer stays empty rather than being inferred from a brand.
 
 Purchase dates preserve the receipt's printed local calendar date. The extraction

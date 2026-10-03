@@ -118,6 +118,31 @@ describe("provider protocol", () => {
         expect(result.raw).toEqual({ choices: [{ message: { content } }] });
       }
     });
+    test(`${responseFormat}: original-language instructions and multilingual text preservation`, async () => {
+      const extraction: Extraction = {
+        ...valid(), merchantName: "Épicerie Müller",
+        items: [
+          { ...item, description: "CRÈME FRAÎCHE", productName: "Crème fraîche", brand: "Président" },
+          { ...item, description: "Bio Hafer Drink", productName: "Bio Hafer Drink", manufacturer: "Müller", unit: "Stück" },
+          { ...item, description: "抹茶 Latte 大", productName: "抹茶 Latte 大" },
+          { ...item, description: "ÄPF.?", productName: null },
+        ],
+        adjustments: [{ description: "Réduction fidélité", kind: "discount", amount: "-0.10" }],
+      };
+      const result = await extractReceipt(new Uint8Array(), "image/png", [],
+        { ...config, ai: { ...config.ai, responseFormat } }, mockFetch((_url, init) => {
+          const prompt = JSON.parse(init!.body as string).messages[0].content;
+          expect(prompt).toContain("original language in item descriptions and productName; never translate or reinterpret them into English or another language");
+          expect(prompt).toContain("retaining accents, diacritics, original script, and mixed-language text");
+          expect(prompt).toContain("keep uncertain wording as printed or use null rather than invent a name");
+          expect(prompt).toContain("preserve the printed language and spelling of merchantName, brand, manufacturer, unit, and adjustment descriptions");
+          expect(prompt).toContain('"CRÈME FRAÎCHE" stays "CRÈME FRAÎCHE", not "Fresh cream"');
+          expect(prompt).toContain("not JSON keys, required enum values, ISO currency codes, or category IDs");
+          expect(prompt).toContain(JSON.stringify(providerSchema));
+          return reply(JSON.stringify(extraction));
+        }));
+      expect(result.extraction).toEqual(extraction);
+    });
   }
   test("date normalization does not guess or hide invalid timestamps", async () => {
     for (const purchasedAt of [
