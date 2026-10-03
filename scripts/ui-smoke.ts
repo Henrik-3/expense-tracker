@@ -19,7 +19,7 @@ const ruleId = "b01731bd-93f7-4dcb-90b7-28bac6660a68";
 const categoryId = "c01731bd-93f7-4dcb-90b7-28bac6660a68";
 function fixture(): ReceiptDetail {
   return {
-    id: receiptId, merchantName: "REWE Viettz ihr Frischemarkt", merchantGroup: "REWE",
+    id: receiptId, merchantName: "REWE ihr markt", merchantGroup: "REWE",
     purchasedAt: "2026-06-01", currency: "EUR", total: "25.00", notes: "",
     status: "ready", revision: 0, warnings: [], error: null, reviewed: false,
     createdAt: "2026-06-01T12:00:00Z", updatedAt: "2026-06-01T12:00:00Z",
@@ -170,7 +170,7 @@ try {
     await expect(preview).toBeChecked();
     await page.getByRole("button", { name: "Receipts", exact: true }).click();
     await expect(page.locator(".receipt-row strong").first()).toHaveText("REWE");
-    await expect(page.locator(".receipt-row")).toContainText("REWE Viettz ihr Frischemarkt");
+    await expect(page.locator(".receipt-row")).toContainText("REWE Borkold ihr Frischemarkt");
     await expect(page.locator(".receipt-row .review-badge")).toHaveText("Not reviewed");
     await page.getByLabel("Review status").selectOption("false");
     await page.locator(".receipt-row").click();
@@ -204,7 +204,7 @@ try {
     await expect(page.getByLabel("Description", { exact: true })).toHaveCount(0);
     const collapsedHeight = await page.locator(".line-items").evaluate(element => element.getBoundingClientRect().height);
     expect(collapsedHeight).toBeLessThan(1700);
-    await expect(page.getByLabel("Shop / merchant")).toHaveValue("REWE Viettz ihr Frischemarkt");
+    await expect(page.getByLabel("Shop / merchant")).toHaveValue("REWE Borkold ihr Frischemarkt");
     const first = page.locator(".line-item").nth(0);
     await first.getByRole("button", { name: /Edit item 1$/ }).focus();
     await page.keyboard.press("Enter");

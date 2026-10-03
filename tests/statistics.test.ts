@@ -10,14 +10,14 @@ const receipt = (changes: Partial<ReceiptDetail> = {}): ReceiptDetail => ({
 describe("exact statistics", () => {
   test("canonical groups merge totals and filters match canonical or printed names", () => {
     const rows = [
-      receipt({ merchantName: "REWE Viettz ihr Frischemarkt", merchantGroup: "Groceries", total: "0.1" }),
+      receipt({ merchantName: "REWE Borkold ihr Frischemarkt", merchantGroup: "Groceries", total: "0.1" }),
       receipt({ merchantName: "REWE Other", merchantGroup: "Groceries", total: "0.2" }),
       receipt({ merchantName: "REWEX", total: "1" }),
     ];
     const result = aggregateStatistics(rows, new Map(), { merchant: "GROCERIES" });
     expect(result.currencies[0]!.merchants).toEqual([{ name: "Groceries", total: "0.3" }]);
     expect(result.currencies[0]!.receiptCount).toBe(2);
-    expect(aggregateStatistics(rows, new Map(), { merchant: "viettz   IHR" }).currencies[0]!.total).toBe("0.1");
+    expect(aggregateStatistics(rows, new Map(), { merchant: "Borkold   IHR" }).currencies[0]!.total).toBe("0.1");
     expect(aggregateStatistics(rows, new Map(), { merchant: "groceries", brand: "brand" }).currencies[0]!.total).toBe("0.8");
   });
   test("printed totals and item breakdowns differ; currencies never mix", () => {

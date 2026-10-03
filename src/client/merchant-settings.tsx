@@ -54,7 +54,7 @@ export function MerchantSettings() {
   };
   return <section>
     <h2>Merchant grouping</h2>
-    <p className="muted">Keep branch names on receipts and group them together in your ledger and insights. For example, “REWE Viettz ihr Frischemarkt” groups as “REWE”. Changes apply to existing receipts too.</p>
+    <p className="muted">Keep branch names on receipts and group them together in your ledger and insights. For example, “REWE ihr markt” groups as “REWE”. Changes apply to existing receipts too.</p>
     <p className="muted small">Matching ignores capitalization and extra spaces. Prefixes match whole words, not partial names. Exact rules win, then the longest matching prefix. Other shops stay separate.</p>
     <form className="card rule-form" onSubmit={event => { event.preventDefault(); submit(value); }}>
       <h3>Add grouping rule</h3>

@@ -202,7 +202,7 @@ orphaned image for administrator cleanup.
 ## Merchant grouping
 
 Open **Settings → Merchants** to add, edit, or delete grouping rules. The default
-rule groups `REWE Viettz ihr Frischemarkt` and other `REWE …` branches as `REWE`.
+rule groups `REWE Borkold ihr Frischemarkt` and other `REWE …` branches as `REWE`.
 Merchant rules group shops without changing the printed `merchantName` or extraction
 data. Receipt summaries and details expose a derived `merchantGroup` (a canonical
 name, or `null` when no rule matches). Changes apply on the next request to both
@@ -211,7 +211,7 @@ existing and newly extracted receipts; no re-extraction or backfill is needed.
 Rules contain `id`, `matchName`, `merchantName` (canonical group), and `matchType`
 (`exact` or `prefix`). Matching ignores case and trims/collapses whitespace. Prefixes
 match complete whitespace-separated tokens: `REWE` matches
-`REWE Viettz ihr Frischemarkt`, but not `REWEX`. Exact matches win; otherwise the
+`REWE Borkold ihr Frischemarkt`, but not `REWEX`. Exact matches win; otherwise the
 longest matching prefix wins, with rule ID as a deterministic final tie-breaker.
 The migration seeds a `REWE` → `REWE` prefix rule once. You can edit or delete it;
 restarting or rerunning migrations will not restore a deleted seed.
