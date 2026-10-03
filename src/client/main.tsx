@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { receiptUpdateSchema, type ReceiptDetail, type ReceiptUpdate, type ReceiptListResponse, type Category, type StatsResponse, type Breakdown } from "../shared/contracts";
 import { createUploadId } from "./upload-id";
+import { Icon } from "./icons";
 import "./style.css";
 
 class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
@@ -58,18 +59,28 @@ function Capture({ open }: { open: (id: string) => void }) {
   }
   function remove(upload: Upload) { URL.revokeObjectURL(upload.url); objectUrls.current.delete(upload.url); setQueue(q => q.filter(u => u.id !== upload.id)); }
   return <section>
+    <div className="page-heading"><div><div className="eyebrow">YOUR PERSONAL WORKSPACE</div><h1>Less paperwork. More life.</h1><p className="muted">Keep your receipts in one place. We’ll help with the details.</p></div><span className="workspace-tag"><Icon name="receipts" /> Receipt Ledger</span></div>
     {health.data?.aiConfigured === false && <p className="notice" role="status"><strong>Automatic reading is not configured yet.</strong> You can still upload receipts safely. Saved photos will wait in the queue until the server’s AI API key and model are configured. Ask your administrator to complete setup.</p>}
     <ErrorMessage error={health.error} />
-    <div className="hero"><div className="eyebrow">LESS ADMIN. MORE LIFE.</div><h1>A little snap.<br />A clearer picture.</h1><p>Capture your receipt. We’ll read the details in the background, so you can get on with your day.</p>
-      <div className="actions"><label className="button primary file-button">◎ Take a photo<input aria-label="Take a receipt photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={e => { pick(e.target.files); e.target.value = ""; }} /></label>
-      <label className="button file-button">↑ Upload receipts<input aria-label="Upload receipt images" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={e => { pick(e.target.files); e.target.value = ""; }} /></label></div>
+    <div className="hero"><div className="hero-copy"><span className="feature-label"><Icon name="capture" /> SNAP. EXTRACT. ORGANIZE.</span><h2>A little snap.<br />A clearer picture.</h2><p>Turn a receipt into the details that matter. Capture a photo and let AI do the first pass.</p>
+      <div className="actions"><label className="button primary file-button"><Icon name="capture" /> Take a photo<input aria-label="Take a receipt photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={e => { pick(e.target.files); e.target.value = ""; }} /></label>
+      <label className="button file-button"><Icon name="upload" /> Upload receipts<input aria-label="Upload receipt images" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={e => { pick(e.target.files); e.target.value = ""; }} /></label></div>
+      <p className="hero-formats">JPEG, PNG or WebP · Upload multiple receipts at once</p>
+      </div><div className="capture-art" aria-hidden="true"><div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="paper-receipt"><div className="paper-mark"><Icon name="receipts" /></div><span className="paper-title">THE DAILY COFFEE</span><span className="paper-caption">A little pick-me-up</span><div className="paper-rule" /><div className="paper-line"><span>Flat white</span><span>4.50</span></div><div className="paper-line"><span>Croissant</span><span>3.00</span></div><div className="paper-rule" /><div className="paper-line paper-total"><span>Total</span><span>7.50</span></div><div className="paper-barcode" /><span className="paper-caption">Have a lovely day!</span></div><div className="scan-label"><span><Icon name="check" /></span>Small receipt. All the details.</div></div>
+    </div>
+    <div className="capture-preferences">
       <label className="check"><input type="checkbox" checked={preview} onChange={e => { setPreview(e.target.checked); try { localStorage.setItem("previewCapture", String(e.target.checked)); } catch { /* optional preference */ } }} /> Review photo before uploading</label>
-      <p className="muted small">JPEG, PNG and WebP · HEIC is not supported. Photos are not stored in browser storage.</p>
+      <span className="muted small">HEIC is not supported. Photos aren’t kept in browser storage.</span>
+    </div>
+    <div className="workflow" aria-label="How it works">
+      <div><span className="step-number">1</span><div><h3>Capture it</h3><p>Snap a photo or upload your receipts.</p></div></div>
+      <div><span className="step-number">2</span><div><h3>Let AI read it</h3><p>Details are extracted in the background.</p></div></div>
+      <div><span className="step-number">3</span><div><h3>Make it yours</h3><p>Review, correct, and see your spending.</p></div></div>
     </div>
     {notice && <p className="error" role="alert">{notice}</p>}
-    <div className="section-heading"><h2>Your capture queue</h2><span>{queue.length} this session</span></div>
+    <div className="section-heading"><h2>Your capture queue <span className="count">{queue.length}</span></h2><span>This session</span></div>
     <p className="muted">Uploading means the file is still on its way. Saved means it is on the server and extraction can continue in the background. Leaving before an upload finishes loses pending local files.</p>
-    {!queue.length && <div className="empty"><span className="empty-symbol">▤</span><h3>Ready when you are</h3><p>Your next receipt starts here. Capture one or upload an existing photo.</p></div>}
+    {!queue.length && <div className="empty"><span className="empty-symbol"><Icon name="receipts" /></span><h3>Ready when you are</h3><p>Your next receipt starts here.<br />Capture one or upload an existing photo.</p></div>}
     <div className="queue">{queue.map(u => <article className="card upload" key={u.id}>
       {u.state !== "saved" && <img src={u.url} alt={`Receipt preview: ${u.name}`} />}
       <div><h3>{u.name}</h3><span className={`badge ${u.state}`}>{u.state === "saved" ? "Saved · background extraction" : u.state === "preview" ? "Awaiting confirmation" : u.state === "uploading" ? "Uploading…" : "Upload failed"}</span>
@@ -81,9 +92,9 @@ function Capture({ open }: { open: (id: string) => void }) {
 function Receipts({ open }: { open: (id: string) => void }) {
   const query = useInfiniteQuery({ queryKey: ["receipts"], initialPageParam: 0, queryFn: ({ pageParam }) => api<ReceiptListResponse>(`/receipts?limit=30&offset=${pageParam}`), getNextPageParam: (last, pages) => { const count = pages.reduce((n, p) => n + p.receipts.length, 0); return count < last.total ? count : undefined; }, refetchInterval: q => q.state.data?.pages.some(p => p.receipts.some(r => busy(r.status))) ? 2500 : false });
   const rows = query.data?.pages.flatMap(p => p.receipts) || [];
-  return <section><div className="section-heading"><div><div className="eyebrow">YOUR PAPER TRAIL, SIMPLIFIED</div><h1>Receipts</h1></div><button onClick={() => void query.refetch()}>Refresh</button></div><ErrorMessage error={query.error} />
+  return <section><div className="page-heading"><div><div className="eyebrow">YOUR PAPER TRAIL, SIMPLIFIED</div><h1>Receipts</h1><p className="muted">All the little details, together in one place.</p></div><button disabled={query.isFetching} onClick={() => void query.refetch()}>{query.isFetching ? "Refreshing…" : "Refresh"}</button></div><ErrorMessage error={query.error} />
     {query.isPending && <p role="status">Loading receipts…</p>}{!query.isPending && !query.error && !rows.length && <div className="empty"><h2>A clean slate</h2><p>Capture your first receipt to start your ledger.</p></div>}
-    <div className="receipt-list">{rows.map(r => <button className="receipt-row" key={r.id} onClick={() => open(r.id)}><span className="receipt-icon">▤</span><span><strong>{r.merchantName || "Untitled receipt"}</strong><small>{r.purchasedAt || `Added ${new Date(r.createdAt).toLocaleDateString()}`}<span className={`badge ${r.status}`}>{label(r.status)}</span></small></span><strong>{money(r.total, r.currency)} <span aria-hidden="true">›</span></strong></button>)}</div>
+    {!!rows.length && <div className="receipt-list"><div className="list-heading" aria-hidden="true"><span>Merchant / date</span><span>Status</span><span>Amount</span></div>{rows.map(r => <button className="receipt-row" key={r.id} onClick={() => open(r.id)}><span className="receipt-icon"><Icon name="receipts" /></span><span className="receipt-merchant"><strong>{r.merchantName || "Untitled receipt"}</strong><small>{r.purchasedAt || `Added ${new Date(r.createdAt).toLocaleDateString()}`}</small></span><span className={`badge ${r.status}`}>{label(r.status)}</span><strong className="receipt-amount">{money(r.total, r.currency)}</strong><Icon name="arrow" /></button>)}</div>}
     {query.hasNextPage && <button disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>{query.isFetchingNextPage ? "Loading…" : "Load more"}</button>}
   </section>;
 }
@@ -165,9 +176,9 @@ function App() {
   const [page, setPage] = useState("capture"); const [id, setId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   function navigate(next: string) { if (dirty && !window.confirm("Leave without saving your edits?")) return; setPage(next); setId(null); }
-  return <><header><a className="logo" href="#capture" onClick={e => { e.preventDefault(); navigate("capture"); }}><span aria-hidden="true">▤</span> receipt<span className="logo-light">ledger</span></a><span className="header-note">Small receipts. Big clarity.</span></header><div className="layout"><nav aria-label="Main navigation">{[["capture", "◎", "Capture"], ["receipts", "▤", "Receipts"], ["stats", "▥", "Insights"], ["categories", "⊞", "Categories"]].map(([key, icon, title]) => <button key={key} className={page === key ? "active" : ""} aria-current={page === key ? "page" : undefined} onClick={() => navigate(key)}><span aria-hidden="true">{icon}</span>{title}</button>)}<p className="nav-note">Your everyday spending,<br />thoughtfully organized.</p></nav><main>
+  return <><a className="skip-link" href="#main">Skip to content</a><div className="layout"><aside className="sidebar"><a className="logo" href="#capture" onClick={e => { e.preventDefault(); navigate("capture"); }}><span className="logo-mark"><Icon name="receipts" /></span><span>receipt<span className="logo-light">ledger</span></span></a><div className="workspace"><span className="workspace-avatar">P</span><div><strong>Personal workspace</strong><small>Your everyday expenses</small></div></div><div className="nav-label">WORKSPACE</div><nav aria-label="Main navigation">{([["capture", "Capture"], ["receipts", "Receipts"], ["stats", "Insights"], ["categories", "Categories"]] as const).map(([key, title]) => <button key={key} className={page === key ? "active" : ""} aria-current={page === key ? "page" : undefined} onClick={() => navigate(key)}><Icon name={key} />{title}</button>)}</nav><div className="sidebar-bottom"><Icon name="shield" /><div><strong>Your ledger. Your server.</strong><p>Self-hosted receipt storage.<br />AI extraction uses your provider.</p></div></div></aside><div className="main-column"><header className="topbar"><span>Personal workspace <span className="breadcrumb-divider">/</span> <strong>{id ? "Receipt details" : ({ capture: "Capture", receipts: "Receipts", stats: "Insights", categories: "Categories" })[page]}</strong></span><span className="profile-avatar" aria-label="Personal workspace">P</span></header><main id="main" tabIndex={-1}>
     <div hidden={page !== "capture" || id !== null}><Capture open={value => { setPage("receipts"); setId(value); }} /></div>
     {page === "receipts" && (id ? <Detail key={id} id={id} back={() => setId(null)} onDirty={setDirty} /> : <Receipts open={setId} />)}{page === "stats" && <Stats />}{page === "categories" && <Categories />}
-    <footer>Receipt Ledger · Keep the details. Lose the paperwork.</footer></main></div></>;
+    <footer><span>Receipt Ledger</span><span>Keep the details. Lose the paperwork.</span></footer></main></div></div></>;
 }
 createRoot(document.getElementById("root")!).render(<React.StrictMode><Boundary><QueryClientProvider client={client}><App /></QueryClientProvider></Boundary></React.StrictMode>);

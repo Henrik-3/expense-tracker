@@ -11,7 +11,8 @@
     "db:migrate": "bun run src/server/db/migrate.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "test:browser": "bun run build && bun run scripts/browser-smoke.ts"
+    "test:browser": "bun run build && bun run scripts/browser-smoke.ts",
+    "test:ui": "bun run build && bun run scripts/ui-smoke.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.0",

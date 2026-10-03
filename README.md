@@ -177,6 +177,19 @@ bun run build
 docker compose --env-file .env.example config --quiet
 ```
 
+For frontend-only checks without PostgreSQL or an AI key, run `bun run test:ui`.
+This uses synthetic API fixtures to exercise capture confirmation, navigation,
+receipt review, unsaved-edit protection, insights, and categories at 320, 390,
+844, and 1365px widths. It also checks keyboard access and horizontal overflow.
+Install Playwright Chromium or set `PLAYWRIGHT_CHANNEL=msedge` / `chrome`.
+Set `UI_SCREENSHOT_DIR` to save synthetic-data desktop and mobile screenshots.
+These checks complement, rather than replace, the real-database workflow below.
+
+The UI takes inspiration from [Expensify’s scan-first workflow](https://use.expensify.com/expense-management)
+and [green / neutral product palette](https://github.com/Expensify/App/blob/main/src/styles/theme/colors.ts).
+Receipt Ledger keeps its own branding, original receipt illustration, and existing
+single-user workflow; it does not imply Expensify integration or affiliation.
+
 Without `TEST_DATABASE_URL`, real-database tests are explicitly skipped. For full
 verification, provision a **dedicated migrated test database with no other
 workers**. Tests use unique rows and remove their own data, but worker claims
