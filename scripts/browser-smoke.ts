@@ -33,7 +33,7 @@ try {
   const browserErrors: string[] = [];
   page.on("pageerror", error => browserErrors.push(error.message));
   await page.goto(server.url.toString());
-  await expect(page.getByRole("heading", { name: "A little snap. A clearer picture." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Less paperwork. More life." })).toBeVisible();
   await page.getByRole("switch", { name: "Review photo before uploading" }).click();
   await page.getByLabel("Upload receipt images").setInputFiles({
     name: "smoke-receipt.png",
@@ -89,7 +89,7 @@ try {
   await page.getByRole("button", { name: "Capture", exact: true }).click();
   await expect(page.getByLabel("Review photo before uploading")).toBeChecked();
   await page.setViewportSize({ width: 1365, height: 900 });
-  await expect(page.getByRole("heading", { name: "A little snap. A clearer picture." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Less paperwork. More life." })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
   expect(browserErrors).toEqual([]);
   console.info("Browser smoke passed: capture confirmation, upload, extraction, correction, filters, category archive, mobile and desktop layout.");

@@ -1,6 +1,6 @@
 /* Shared styling for Headless UI's unstyled controls and interactive states. */
 [data-disabled] { cursor: not-allowed; }
-[data-focus]:focus-visible { outline: 3px solid #cc8c37; outline-offset: 3px; }
+[data-focus]:focus-visible { outline: 3px solid #1687c1; outline-offset: 3px; }
 .toggle {
   position: relative;
   flex: 0 0 44px;

@@ -225,6 +225,16 @@ restoration, and locked processing receipts. Use `PLAYWRIGHT_CHANNEL=msedge` or
 `bunx --bun playwright install chromium`. `SCREENSHOT_PATH` optionally saves the
 mobile receipt editor. These checks supplement, not replace, the database suite.
 
+The same command also uses synthetic API fixtures to exercise capture confirmation, navigation,
+receipt review, unsaved-edit protection, insights, and categories at 320, 390,
+844, and 1365px widths. It also checks keyboard access and horizontal overflow.
+Set `UI_SCREENSHOT_DIR` to save synthetic-data desktop and mobile screenshots.
+
+The UI takes inspiration from [Expensify’s scan-first workflow](https://use.expensify.com/expense-management)
+and [green / neutral product palette](https://github.com/Expensify/App/blob/main/src/styles/theme/colors.ts).
+Receipt Ledger keeps its own branding, original receipt illustration, and existing
+single-user workflow; it does not imply Expensify integration or affiliation.
+
 Without `TEST_DATABASE_URL`, real-database tests are explicitly skipped. For full
 verification, provision a **dedicated migrated test database with no other
 workers**. Tests use unique rows and remove their own data, but worker claims
