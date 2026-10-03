@@ -44,6 +44,7 @@ export const receiptUpdateSchema = receiptFieldsSchema.extend({
 export type ReceiptUpdate = z.infer<typeof receiptUpdateSchema>;
 
 export interface ReceiptSummary extends z.infer<typeof receiptFieldsSchema> {
+  merchantGroup: string | null;
   id: string;
   status: ReceiptStatus;
   warnings: string[];
@@ -70,6 +71,13 @@ export const categoryInputSchema = z.object({
   name: z.string().trim().min(1).max(100),
   archived: z.boolean().optional(),
 });
+
+export const merchantRuleInputSchema = z.object({
+  matchName: z.string().transform((value) => value.trim().replace(/\s+/g, " ")).pipe(z.string().min(1).max(200)),
+  merchantName: z.string().transform((value) => value.trim().replace(/\s+/g, " ")).pipe(z.string().min(1).max(200)),
+  matchType: z.enum(["exact", "prefix"]),
+});
+export type MerchantRule = z.infer<typeof merchantRuleInputSchema> & { id: string };
 
 // This is the validated application shape, not a provider-specific wire schema.
 export const extractionSchema = receiptFieldsSchema.omit({ notes: true }).extend({
@@ -109,6 +117,12 @@ export interface StatsResponse {
 // GET /api/categories -> { categories: Category[] } (includes archived)
 // POST /api/categories (categoryInputSchema) -> { category: Category }
 // PATCH /api/categories/:id (categoryInputSchema) -> { category: Category }
+// GET /api/merchant-rules -> { rules: MerchantRule[] }
+// POST /api/merchant-rules (merchantRuleInputSchema) -> { rule: MerchantRule }
+// PATCH /api/merchant-rules/:id (merchantRuleInputSchema, all fields required) -> { rule: MerchantRule }
+// DELETE /api/merchant-rules/:id -> 204
+// Receipt summaries/details expose merchantGroup (null when no rule matches);
+// merchantName remains the printed name. Merchant stats use group or printed name.
 // GET /api/stats?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month
 //   &merchant=...&categoryId=...&brand=...&manufacturer=...&includeNeedsReview=true -> StatsResponse
 // Errors: { error: string }, with appropriate 4xx/5xx HTTP status.

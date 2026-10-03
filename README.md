@@ -13,10 +13,13 @@ items in the background, and correct everything before using it in your reports.
 - OpenAI-compatible vision extraction with validated structured output.
 - Editable shop, purchase date, currency, total, notes, every product field,
   quantities, prices, categories, brands/manufacturers, discounts, and fees.
-- Configurable categories, including rename, archive, and unarchive.
+- Compact line-item summaries; expand only the items you want to edit.
+- Settings for categories (rename/archive/unarchive) and merchant grouping rules.
+- Headless UI controls, keyboard-accessible tabs/disclosures, and focused dialogs,
+  styled with the application's shared CSS rather than a separate CSS framework.
 - Daily, Monday-based weekly, and monthly statistics; date, shop, category,
   brand, and manufacturer filters. Currencies are always separate.
-- Responsive capture, receipt editor, category management, and insights pages.
+- Responsive capture, receipt editor, settings, and insights pages.
 
 This first version is **single-user with authentication delegated to the reverse
 proxy**. The application itself has no login. Do not expose it directly to the
@@ -109,7 +112,9 @@ calls to a third-party API without that provider's idempotency support.
 2. Wait for **Saved** before leaving the app. Uploading/failed/preview files live
    only in memory; a refresh or closed tab loses those pending local files.
 3. Continue capturing while processing runs in the background.
-4. Open a receipt to view its original and edit the extracted fields.
+4. Open a receipt to view its original and edit the extracted fields. Line items
+   start as compact rows with quantity, category, and subtotal. Expand a row to
+   edit all its fields; collapsing it retains your draft. New items open for editing.
 5. Choose **Save · Ready** or **Save · Needs review**.
 
 `Ready` requires a date, currency, total, at least one line item, known line and
@@ -127,6 +132,41 @@ Pending/processing receipts are locked for editing. Failed, unedited receipts
 can be retried. Once manually saved, a receipt cannot be re-extracted in this
 version, so retries cannot overwrite corrections. Concurrent edits use revision
 checks; a conflict retains your draft and offers an explicit refresh.
+
+## Merchant grouping
+
+Open **Settings → Merchants** to add, edit, or delete grouping rules. The default
+rule groups `REWE Viettz ihr Frischemarkt` and other `REWE …` branches as `REWE`.
+Merchant rules group shops without changing the printed `merchantName` or extraction
+data. Receipt summaries and details expose a derived `merchantGroup` (a canonical
+name, or `null` when no rule matches). Changes apply on the next request to both
+existing and newly extracted receipts; no re-extraction or backfill is needed.
+
+Rules contain `id`, `matchName`, `merchantName` (canonical group), and `matchType`
+(`exact` or `prefix`). Matching ignores case and trims/collapses whitespace. Prefixes
+match complete whitespace-separated tokens: `REWE` matches
+`REWE Viettz ihr Frischemarkt`, but not `REWEX`. Exact matches win; otherwise the
+longest matching prefix wins, with rule ID as a deterministic final tie-breaker.
+The migration seeds a `REWE` → `REWE` prefix rule once. You can edit or delete it;
+restarting or rerunning migrations will not restore a deleted seed.
+
+API:
+- `GET /api/merchant-rules` → `{ rules: MerchantRule[] }`
+- `POST /api/merchant-rules` → `{ rule: MerchantRule }` (201)
+- `PATCH /api/merchant-rules/:id` → `{ rule: MerchantRule }` (200)
+- `DELETE /api/merchant-rules/:id` → 204
+
+POST and PATCH require all three fields: `{ matchName, merchantName, matchType }`.
+Names are normalized for whitespace and must contain 1–200 characters. An identical
+case-insensitive normalized match with the same match type returns 409, including
+concurrent writes; exact and prefix rules may coexist for the same match name.
+Invalid input/UUID/JSON returns 400, and missing rule IDs return 404.
+
+Statistics combine merchant totals by canonical group, falling back to the printed
+name (or `Unknown`). The merchant filter is a case-insensitive, whitespace-normalized
+substring search over **either** canonical or printed name. Currency separation and
+item-filter accounting are unchanged. Receipt-list/detail reads and statistics use
+repeatable-read snapshots so one response cannot mix old and new rule sets.
 
 ## Statistics rules
 
@@ -176,6 +216,14 @@ bun test
 bun run build
 docker compose --env-file .env.example config --quiet
 ```
+
+For browser UI checks without PostgreSQL or AI, run `bun run test:ui`. This builds
+the app and tests mocked API workflows at mobile and desktop widths: a 25-item
+receipt, preserved edits, keyboard interaction, settings CRUD/errors, focus
+restoration, and locked processing receipts. Use `PLAYWRIGHT_CHANNEL=msedge` or
+`chrome` for an installed browser, or install Chromium with
+`bunx --bun playwright install chromium`. `SCREENSHOT_PATH` optionally saves the
+mobile receipt editor. These checks supplement, not replace, the database suite.
 
 Without `TEST_DATABASE_URL`, real-database tests are explicitly skipped. For full
 verification, provision a **dedicated migrated test database with no other
@@ -243,13 +291,14 @@ do not control what appears in OpenRouter's activity dashboard.
 ## Code map and operational limits
 
 - `src/shared/contracts.ts`: shared validation and HTTP contract.
-- `src/server/app.ts`: receipt/category/statistics API.
+- `src/server/app.ts`: receipt/category/merchant-rule/statistics API.
 - `src/server/worker.ts`: durable jobs, leases, retries, and atomic completion.
 - `src/server/ai/extractor.ts`: provider adapter, prompt, schema, safe errors.
 - `src/server/services/`: reconciliation, statistics, durable image writes.
 - `src/server/db/`: relational schema and checksum-protected SQL migrations.
 - `src/client/`: React UI and responsive styles.
-- `scripts/browser-smoke.ts`, `tests/`: browser, unit, and integration checks.
+- `scripts/browser-smoke.ts`, `scripts/ui-smoke.ts`, `tests/`: browser, unit, and
+  integration checks.
 
 Original images and raw AI outputs remain stored. Configuring AI means receipt
 images are sent to that provider; its retention/privacy policy applies. Use disk
@@ -262,7 +311,7 @@ automated orphan sweep yet. Do not delete suspected orphans while uploads run.
 
 This MVP supports one image per receipt, purchase dates (not times), flat
 categories, and an OpenAI-compatible Chat Completions vision API. No HEIC/PDF
-conversion, automatic shop-alias normalization, learned category rules, offline
+conversion, learned category rules, offline
 uploads, receipt deletion, CSV export, built-in accounts, or multi-page receipts
 yet. Statistics aggregate selected receipt data in process; very large datasets
 will eventually warrant SQL aggregation. Multiple app replicas must share the

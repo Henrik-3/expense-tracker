@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import { createDatabase } from "../src/server/db";
 import { migrate } from "../src/server/db/migrate";
-import { categories, jobs, receipts } from "../src/server/db/schema";
+import { categories, jobs, receipts, merchantRules } from "../src/server/db/schema";
 import { loadConfig } from "../src/server/config";
 import { createServer } from "../src/server/server";
 import { processOneJob } from "../src/server/worker";
@@ -155,6 +155,119 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
     expect((await patch(receiptId, { ...inconsistent, status: "needs_review" })).status).toBe(200);
     const excluded: StatsResponse = await (await request(`/api/stats?merchant=${merchant}`)).json();
     expect(excluded.currencies).toHaveLength(0);
+  });
+
+  test("merchant rules persist and dynamically regroup old receipts, with consistent errors", async () => {
+    const name = `Rule test ${randomUUID()}`;
+    const canonical = `Canonical ${randomUUID()}`;
+    const ruleIds: string[] = [];
+    const write = (path: string, method: string, body: unknown) => request(path, {
+      method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    try {
+      for (const suffix of ["Branch", "Other"]) {
+        const receiptId = randomUUID();
+        receiptIds.push(receiptId);
+        await database.db.insert(receipts).values({
+          id: receiptId, status: "ready", merchantName: `${name} ${suffix}`, purchasedAt: "2026-06-01",
+          currency: "EUR", total: suffix === "Branch" ? "0.1" : "0.2",
+          imagePath: "unused.png", imageMime: "image/png", imageSha256: "unused", originalFilename: "unused.png",
+        });
+        expect((await getReceipt(receiptId)).merchantGroup).toBeNull();
+      }
+      const input = { matchName: name, merchantName: canonical, matchType: "prefix" };
+      const created = await write("/api/merchant-rules", "POST", input);
+      expect(created.status).toBe(201);
+      const { rule } = await created.json();
+      ruleIds.push(rule.id);
+      // A fresh application instance reads persisted rules, not process-local state.
+      const fresh = createServer(database.db, config);
+      const persisted = await (await fresh.request("http://localhost/api/merchant-rules")).json();
+      expect(persisted.rules).toContainEqual(rule);
+      const branchId = receiptIds[receiptIds.length - 2]!;
+      expect((await getReceipt(branchId)).merchantGroup).toBe(canonical);
+      expect((await getReceipt(branchId)).merchantName).toBe(`${name} Branch`);
+      const listed = await (await request("/api/receipts?limit=100")).json();
+      expect(listed.receipts.find((row: ReceiptDetail) => row.id === branchId)?.merchantGroup).toBe(canonical);
+      const stats = await (await request(`/api/stats?merchant=${encodeURIComponent(canonical)}`)).json();
+      expect(stats.currencies[0].merchants).toEqual([{ name: canonical, total: "0.3" }]);
+      expect(stats.currencies[0].receiptCount).toBe(2);
+      const printed = await (await request(`/api/stats?merchant=${encodeURIComponent(`${name} Branch`)}`)).json();
+      expect(printed.currencies[0].total).toBe("0.1");
+      // Force a concurrent committed rule edit after the read snapshot begins.
+      // The response must still filter and aggregate with the original rule set.
+      const snapshotTransaction: typeof database.db.transaction = (callback, options) =>
+        database.db.transaction(async (tx) => {
+          await tx.select().from(receipts).limit(1);
+          await database.db.update(merchantRules).set({ merchantName: `${canonical} concurrent` }).where(eq(merchantRules.id, rule.id));
+          return callback(tx);
+        }, options);
+      const snapshotDatabase = new Proxy(database.db, {
+        get(target, property) {
+          if (property === "transaction") return snapshotTransaction;
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const snapshotApp = createServer(snapshotDatabase, config);
+      const snapshotStats = await (await snapshotApp.request(`http://localhost/api/stats?merchant=${encodeURIComponent(canonical)}`)).json();
+      expect(snapshotStats.currencies[0].merchants).toEqual([{ name: canonical, total: "0.3" }]);
+      expect((await getReceipt(branchId)).merchantGroup).toBe(`${canonical} concurrent`);
+      await database.db.update(merchantRules).set({ merchantName: canonical }).where(eq(merchantRules.id, rule.id));
+      const duplicates = await Promise.all([
+        write("/api/merchant-rules", "POST", { ...input, matchName: name.toUpperCase().replaceAll(" ", "\t ") }),
+        write("/api/merchant-rules", "POST", input),
+      ]);
+      expect(duplicates.map((response) => response.status)).toEqual([409, 409]);
+      const racing = await Promise.all([
+        write("/api/merchant-rules", "POST", { ...input, matchName: `${name} Race` }),
+        write("/api/merchant-rules", "POST", { ...input, matchName: `${name} RACE` }),
+      ]);
+      for (const response of racing) if (response.status === 201) ruleIds.push((await response.json()).rule.id);
+      expect(racing.map((response) => response.status).sort()).toEqual([201, 409]);
+      const exactResponse = await write("/api/merchant-rules", "POST", { ...input, matchType: "exact" });
+      expect(exactResponse.status).toBe(201);
+      const exact = (await exactResponse.json()).rule;
+      ruleIds.push(exact.id);
+      expect((await write(`/api/merchant-rules/${exact.id}`, "PATCH", input)).status).toBe(409);
+      expect((await write("/api/merchant-rules", "POST", { ...input, matchName: " " })).status).toBe(400);
+      expect((await write("/api/merchant-rules", "POST", { ...input, merchantName: "" })).status).toBe(400);
+      expect((await write("/api/merchant-rules", "POST", { ...input, matchType: "contains" })).status).toBe(400);
+      expect((await write("/api/merchant-rules", "POST", {})).status).toBe(400);
+      expect((await write(`/api/merchant-rules/${randomUUID()}`, "PATCH", input)).status).toBe(404);
+      expect((await request("/api/merchant-rules/invalid", { method: "DELETE" })).status).toBe(400);
+      const edited = await write(`/api/merchant-rules/${rule.id}`, "PATCH", { ...input, merchantName: `${canonical} edited` });
+      expect(edited.status).toBe(200);
+      expect((await getReceipt(branchId)).merchantGroup).toBe(`${canonical} edited`);
+      expect((await request(`/api/merchant-rules/${rule.id}`, { method: "DELETE" })).status).toBe(204);
+      expect((await request(`/api/merchant-rules/${rule.id}`, { method: "DELETE" })).status).toBe(404);
+      expect((await getReceipt(branchId)).merchantGroup).toBeNull();
+    } finally {
+      if (ruleIds.length) await database.db.delete(merchantRules).where(inArray(merchantRules.id, ruleIds));
+    }
+  });
+
+  test("the seeded REWE prefix can be edited/deleted without migrations recreating it", async () => {
+    const [seed] = await database.db.select().from(merchantRules).where(eq(merchantRules.matchName, "REWE"));
+    expect(seed).toBeDefined();
+    if (!seed) return;
+    try {
+      const edited = await request(`/api/merchant-rules/${seed.id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ matchName: seed.matchName, merchantName: "Edited REWE group", matchType: "prefix" }),
+      });
+      expect(edited.status).toBe(200);
+      await migrate(url!);
+      const [persisted] = await database.db.select().from(merchantRules).where(eq(merchantRules.id, seed.id));
+      expect(persisted?.merchantName).toBe("Edited REWE group");
+      expect((await request(`/api/merchant-rules/${seed.id}`, { method: "DELETE" })).status).toBe(204);
+      await migrate(url!);
+      expect(await database.db.select().from(merchantRules).where(eq(merchantRules.id, seed.id))).toHaveLength(0);
+    } finally {
+      await database.db.insert(merchantRules).values(seed).onConflictDoUpdate({
+        target: merchantRules.id, set: { matchName: seed.matchName, merchantName: seed.merchantName, matchType: seed.matchType },
+      });
+    }
   });
 
   test("browser writes are same-origin and health does not expose credentials", async () => {

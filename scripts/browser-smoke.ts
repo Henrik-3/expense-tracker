@@ -34,7 +34,7 @@ try {
   page.on("pageerror", error => browserErrors.push(error.message));
   await page.goto(server.url.toString());
   await expect(page.getByRole("heading", { name: "A little snap. A clearer picture." })).toBeVisible();
-  await page.getByLabel("Review photo before uploading").check();
+  await page.getByRole("switch", { name: "Review photo before uploading" }).click();
   await page.getByLabel("Upload receipt images").setInputFiles({
     name: "smoke-receipt.png",
     mimeType: "image/png",
@@ -59,6 +59,7 @@ try {
   await processOneJob(db, config, fakeFetch);
   await page.getByRole("button", { name: "View receipt", exact: true }).click();
   await expect(page.getByLabel("Shop / merchant")).toHaveValue("Browser test shop");
+  await page.getByRole("button", { name: /Edit item 1$/ }).click();
   await page.getByLabel("Brand", { exact: true }).fill("Edited brand");
   await page.getByRole("button", { name: "Save · Ready", exact: true }).click();
   await expect(page.getByText("Saved as ready.", { exact: true })).toBeVisible();
@@ -74,7 +75,8 @@ try {
   expect(overflow).toBe(false);
   if (process.env.SCREENSHOT_PATH) await page.screenshot({ path: process.env.SCREENSHOT_PATH, fullPage: true });
 
-  await page.getByRole("button", { name: "Categories", exact: true }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("tab", { name: "Categories", exact: true }).click();
   const categoryName = `Browser test ${crypto.randomUUID()}`;
   await page.getByLabel("New category", { exact: true }).fill(categoryName);
   const categoryCreated = page.waitForResponse(response => response.url().endsWith("/api/categories") && response.request().method() === "POST");

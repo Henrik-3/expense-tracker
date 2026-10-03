@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
 import type { ReceiptDetail, StatsResponse, CurrencyStats, Breakdown } from "../../shared/contracts";
+import { normalizeMerchant } from "./merchant-grouping";
 
 // A local constructor avoids changing precision for extraction reconciliation.
 // 40 digits accommodates exact sums of all representable input amounts.
@@ -30,7 +31,7 @@ export function aggregateStatistics(receipts: ReceiptDetail[], categories: Map<s
   };
   for (const receipt of receipts) {
     if (receipt.status !== "ready" && !(filters.includeNeedsReview && receipt.status === "needs_review")) continue;
-    if (filters.merchant && !(receipt.merchantName ?? "").toLowerCase().includes(filters.merchant.toLowerCase())) continue;
+    if (filters.merchant && ![receipt.merchantName, receipt.merchantGroup].some((name) => normalizeMerchant(name ?? "").includes(normalizeMerchant(filters.merchant!)))) continue;
     if (filters.from && (!receipt.purchasedAt || receipt.purchasedAt < filters.from)) continue;
     if (filters.to && (!receipt.purchasedAt || receipt.purchasedAt > filters.to)) continue;
     const items = receipt.items.filter((item) =>
@@ -56,7 +57,7 @@ export function aggregateStatistics(receipts: ReceiptDetail[], categories: Map<s
       bucket = date.toISOString().slice(0, 10);
     }
     add(group.timeline, bucket, total);
-    add(group.merchants, receipt.merchantName || "Unknown", total);
+    add(group.merchants, receipt.merchantGroup || receipt.merchantName || "Unknown", total);
     for (const item of items) {
       if (item.lineTotal === null) continue;
       add(group.categories, item.categoryId ? categories.get(item.categoryId) ?? "Uncategorized" : "Uncategorized", item.lineTotal);

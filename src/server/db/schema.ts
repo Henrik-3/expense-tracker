@@ -7,6 +7,13 @@ export const categories = pgTable("categories", {
   archived: boolean("archived").notNull().default(false),
 });
 
+export const merchantRules = pgTable("merchant_rules", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  matchName: text("match_name").notNull(),
+  merchantName: text("merchant_name").notNull(),
+  matchType: text("match_type").$type<"exact" | "prefix">().notNull(),
+});
+
 export const receipts = pgTable("receipts", {
   id: uuid("id").primaryKey().defaultRandom(),
   status: text("status").$type<ReceiptStatus>().notNull().default("queued"),

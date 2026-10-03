@@ -1,14 +1,15 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
-import { and, eq, desc, count, gte, lte, inArray, sql } from "drizzle-orm";
+import { and, eq, desc, count, gte, lte, inArray } from "drizzle-orm";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdir, unlink, readFile } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import type { Database } from "./db";
 import type { Config } from "./config";
-import { receipts, receiptItems, receiptAdjustments, jobs, categories } from "./db/schema";
-import { receiptUpdateSchema, categoryInputSchema, type ReceiptDetail } from "../shared/contracts";
+import { receipts, receiptItems, receiptAdjustments, jobs, categories, merchantRules } from "./db/schema";
+import { receiptUpdateSchema, categoryInputSchema, merchantRuleInputSchema, type ReceiptDetail } from "../shared/contracts";
+import { merchantResolver } from "./services/merchant-grouping";
 import { assessExtraction } from "./services/reconciliation";
 import { aggregateStatistics } from "./services/statistics";
 import { writeDurableImage } from "./services/storage";
@@ -17,15 +18,16 @@ import { uuidSchema, paginationSchema, statsQuerySchema, imageMime } from "./api
 type Reader = Pick<Database, "select">;
 function fail(status: 400 | 404 | 409 | 413 | 415, message: string): never { throw new HTTPException(status, { message }); }
 function id(value: string) { const parsed = uuidSchema.safeParse(value); if (!parsed.success) fail(400, "Invalid UUID"); return parsed.data; }
-function summary(row: typeof receipts.$inferSelect) {
-  return { id: row.id, status: row.status, merchantName: row.merchantName, purchasedAt: row.purchasedAt, currency: row.currency, total: row.total, notes: row.notes, warnings: row.warnings, error: row.error, revision: row.revision, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
+function summary(row: typeof receipts.$inferSelect, resolveMerchant: ReturnType<typeof merchantResolver>) {
+  return { id: row.id, status: row.status, merchantName: row.merchantName, merchantGroup: resolveMerchant(row.merchantName), purchasedAt: row.purchasedAt, currency: row.currency, total: row.total, notes: row.notes, warnings: row.warnings, error: row.error, revision: row.revision, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
 }
 async function detail(db: Reader, receiptId: string): Promise<ReceiptDetail> {
+  const resolveMerchant = merchantResolver(await db.select().from(merchantRules));
   const [row] = await db.select().from(receipts).where(eq(receipts.id, receiptId));
   if (!row) fail(404, "Receipt not found");
   const items = await db.select().from(receiptItems).where(eq(receiptItems.receiptId, receiptId)).orderBy(receiptItems.position);
   const adjustments = await db.select().from(receiptAdjustments).where(eq(receiptAdjustments.receiptId, receiptId)).orderBy(receiptAdjustments.position);
-  return { ...summary(row), imageUrl: `/api/receipts/${row.id}/image`, items: items.map(({ receiptId: _, position: __, ...item }) => item), adjustments: adjustments.map(({ receiptId: _, position: __, ...item }) => item) };
+  return { ...summary(row, resolveMerchant), imageUrl: `/api/receipts/${row.id}/image`, items: items.map(({ receiptId: _, position: __, ...item }) => item), adjustments: adjustments.map(({ receiptId: _, position: __, ...item }) => item) };
 }
 
 export function createApp(db: Database, config: Config) {
@@ -43,9 +45,12 @@ export function createApp(db: Database, config: Config) {
   app.get("/api/receipts", async (c) => {
     const query = paginationSchema.safeParse(c.req.query());
     if (!query.success) fail(400, "Invalid pagination");
-    const rows = await db.select().from(receipts).orderBy(desc(receipts.createdAt), receipts.id).limit(query.data.limit).offset(query.data.offset);
-    const [total] = await db.select({ value: count() }).from(receipts);
-    return c.json({ receipts: rows.map(summary), total: total!.value });
+    return db.transaction(async (tx) => {
+      const resolveMerchant = merchantResolver(await tx.select().from(merchantRules));
+      const rows = await tx.select().from(receipts).orderBy(desc(receipts.createdAt), receipts.id).limit(query.data.limit).offset(query.data.offset);
+      const [total] = await tx.select({ value: count() }).from(receipts);
+      return c.json({ receipts: rows.map((row) => summary(row, resolveMerchant)), total: total!.value });
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
   });
   app.post("/api/receipts", async (c) => {
     let form: FormData;
@@ -79,7 +84,8 @@ export function createApp(db: Database, config: Config) {
         await tx.insert(jobs).values({ receiptId });
         return true;
       });
-      return c.json({ receipt: await detail(db, receiptId) }, result ? 201 : 200);
+      const receipt = await db.transaction((tx) => detail(tx, receiptId), { isolationLevel: "repeatable read", accessMode: "read only" });
+      return c.json({ receipt }, result ? 201 : 200);
     } finally { if (!keep) await unlink(path).catch(() => {}); }
   });
   app.get("/api/receipts/:id", async (c) => {
@@ -136,6 +142,27 @@ export function createApp(db: Database, config: Config) {
     return c.json({ receipt });
   });
   app.get("/api/categories", async (c) => c.json({ categories: await db.select().from(categories).orderBy(categories.name) }));
+  app.get("/api/merchant-rules", async (c) => c.json({ rules: await db.select().from(merchantRules).orderBy(merchantRules.matchType, merchantRules.matchName, merchantRules.id) }));
+  for (const method of ["post", "patch"] as const) app[method](method === "post" ? "/api/merchant-rules" : "/api/merchant-rules/:id", async (c) => {
+    const parsed = merchantRuleInputSchema.safeParse(await json(c));
+    if (!parsed.success) fail(400, "Invalid merchant rule");
+    const ruleId = method === "patch" ? id(c.req.param("id")!) : undefined;
+    try {
+      const rows = method === "post" ? await db.insert(merchantRules).values(parsed.data).returning()
+        : await db.update(merchantRules).set(parsed.data).where(eq(merchantRules.id, ruleId!)).returning();
+      if (!rows[0]) fail(404, "Merchant rule not found");
+      return c.json({ rule: rows[0] }, method === "post" ? 201 : 200);
+    } catch (error) {
+      const cause = error as { code?: string; cause?: { code?: string } };
+      if (cause.code === "23505" || cause.cause?.code === "23505") fail(409, "Merchant match rule already exists");
+      throw error;
+    }
+  });
+  app.delete("/api/merchant-rules/:id", async (c) => {
+    const rows = await db.delete(merchantRules).where(eq(merchantRules.id, id(c.req.param("id")))).returning();
+    if (!rows.length) fail(404, "Merchant rule not found");
+    return c.body(null, 204);
+  });
   for (const method of ["post", "patch"] as const) app[method](method === "post" ? "/api/categories" : "/api/categories/:id", async (c) => {
     const parsed = categoryInputSchema.safeParse(await json(c));
     if (!parsed.success) fail(400, "Invalid category");
@@ -158,7 +185,6 @@ export function createApp(db: Database, config: Config) {
         filters.includeNeedsReview ? inArray(receipts.status, ["ready", "needs_review"]) : eq(receipts.status, "ready"),
         filters.from ? gte(receipts.purchasedAt, filters.from) : undefined,
         filters.to ? lte(receipts.purchasedAt, filters.to) : undefined,
-        filters.merchant ? sql`position(lower(${filters.merchant}) in lower(coalesce(${receipts.merchantName}, ''))) > 0` : undefined,
       );
       const rows = await tx.select().from(receipts).where(eligible);
       // A subquery avoids one query parameter per receipt and the driver's
@@ -171,7 +197,8 @@ export function createApp(db: Database, config: Config) {
         list.push(item);
         itemsByReceipt.set(receiptId, list);
       }
-      const details: ReceiptDetail[] = rows.map((row) => ({ ...summary(row), imageUrl: "", items: itemsByReceipt.get(row.id) ?? [], adjustments: [] }));
+      const resolveMerchant = merchantResolver(await tx.select().from(merchantRules));
+      const details: ReceiptDetail[] = rows.map((row) => ({ ...summary(row, resolveMerchant), imageUrl: "", items: itemsByReceipt.get(row.id) ?? [], adjustments: [] }));
       const names = new Map((await tx.select().from(categories)).map((category) => [category.id, category.name]));
       return c.json(aggregateStatistics(details, names, parsed.data));
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
