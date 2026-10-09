@@ -35,7 +35,9 @@ async function main() {
 }
 
 if (import.meta.main) {
-  main().catch(() => {
+  main().catch((error: unknown) => {
+    const e = error as { name?: string; code?: string; message?: string };
+    console.error(`Startup error: ${e?.name ?? "Error"}${e?.code ? ` [${e.code}]` : ""}: ${String(e?.message ?? error).replace(/\/\/[^@\s/]*@/g, "//***@")}`);
     // Configuration/connection errors may include credentials; don't dump them.
     console.error("Startup failed. Check DATABASE_URL, database availability, and environment configuration.");
     process.exitCode = 1;
