@@ -17,11 +17,14 @@ export async function migrate(databaseUrl: string) {
         applied_at timestamptz NOT NULL DEFAULT now()
       )`;
       for (const name of migrations) {
-        const source = await readFile(new URL(`./migrations/${name}`, import.meta.url), "utf8");
+        const raw = await readFile(new URL(`./migrations/${name}`, import.meta.url), "utf8");
+        // Normalize line endings so CRLF (Windows checkouts) and LF (CI/Docker) hash identically.
+        const source = raw.replace(/\r\n/g, "\n");
         const checksum = createHash("sha256").update(source).digest("hex");
+        const legacyChecksum = createHash("sha256").update(raw).digest("hex");
         const [existing] = await tx`SELECT checksum FROM schema_migrations WHERE name = ${name}`;
         if (existing) {
-          if (existing.checksum !== checksum) throw new Error(`Applied migration was modified: ${name}`);
+          if (existing.checksum !== checksum && existing.checksum !== legacyChecksum) throw new Error(`Applied migration was modified: ${name}`);
           continue;
         }
         await tx.unsafe(source);
