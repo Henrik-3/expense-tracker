@@ -1,10 +1,10 @@
-CREATE TABLE categories (
+CREATE TABLE IF NOT EXISTS categories (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL UNIQUE,
   archived boolean NOT NULL DEFAULT false
 );
 
-CREATE TABLE receipts (
+CREATE TABLE IF NOT EXISTS receipts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   status text NOT NULL DEFAULT 'queued'
     CHECK (status IN ('queued', 'processing', 'ready', 'needs_review', 'failed')),
@@ -23,10 +23,10 @@ CREATE TABLE receipts (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX receipts_purchase_idx ON receipts(purchased_at);
-CREATE INDEX receipts_status_idx ON receipts(status);
+CREATE INDEX IF NOT EXISTS receipts_purchase_idx ON receipts(purchased_at);
+CREATE INDEX IF NOT EXISTS receipts_status_idx ON receipts(status);
 
-CREATE TABLE receipt_items (
+CREATE TABLE IF NOT EXISTS receipt_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   receipt_id uuid NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
   position integer NOT NULL,
@@ -40,9 +40,9 @@ CREATE TABLE receipt_items (
   brand text,
   manufacturer text
 );
-CREATE INDEX receipt_items_receipt_idx ON receipt_items(receipt_id);
+CREATE INDEX IF NOT EXISTS receipt_items_receipt_idx ON receipt_items(receipt_id);
 
-CREATE TABLE receipt_adjustments (
+CREATE TABLE IF NOT EXISTS receipt_adjustments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   receipt_id uuid NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
   position integer NOT NULL,
@@ -50,9 +50,9 @@ CREATE TABLE receipt_adjustments (
   kind text NOT NULL CHECK (kind IN ('discount', 'fee', 'deposit', 'rounding', 'other')),
   amount numeric(14,4)
 );
-CREATE INDEX receipt_adjustments_receipt_idx ON receipt_adjustments(receipt_id);
+CREATE INDEX IF NOT EXISTS receipt_adjustments_receipt_idx ON receipt_adjustments(receipt_id);
 
-CREATE TABLE jobs (
+CREATE TABLE IF NOT EXISTS jobs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   receipt_id uuid NOT NULL UNIQUE REFERENCES receipts(id) ON DELETE CASCADE,
   state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed')),
@@ -62,9 +62,9 @@ CREATE TABLE jobs (
   locked_by text,
   last_error text
 );
-CREATE INDEX jobs_claim_idx ON jobs(state, available_at);
+CREATE INDEX IF NOT EXISTS jobs_claim_idx ON jobs(state, available_at);
 
-CREATE TABLE extraction_runs (
+CREATE TABLE IF NOT EXISTS extraction_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   receipt_id uuid NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
   model text NOT NULL,
@@ -76,4 +76,5 @@ CREATE TABLE extraction_runs (
 
 INSERT INTO categories(name) VALUES
   ('Groceries'), ('Dining out'), ('Household'), ('Health'),
-  ('Transport'), ('Clothing'), ('Electronics'), ('Other');
+  ('Transport'), ('Clothing'), ('Electronics'), ('Other')
+ON CONFLICT (name) DO NOTHING;
