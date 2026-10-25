@@ -21,10 +21,14 @@ export async function migrate(databaseUrl: string) {
         // Normalize line endings so CRLF (Windows checkouts) and LF (CI/Docker) hash identically.
         const source = raw.replace(/\r\n/g, "\n");
         const checksum = createHash("sha256").update(source).digest("hex");
-        const legacyChecksum = createHash("sha256").update(raw).digest("hex");
+        // Older releases hashed the raw file, so databases first migrated from a
+        // Windows checkout hold the CRLF hash even when this copy is LF (Docker).
+        const crlfChecksum = createHash("sha256").update(source.replace(/\n/g, "\r\n")).digest("hex");
         const [existing] = await tx`SELECT checksum FROM schema_migrations WHERE name = ${name}`;
         if (existing) {
-          if (existing.checksum !== checksum && existing.checksum !== legacyChecksum) throw new Error(`Applied migration was modified: ${name}`);
+          if (existing.checksum === crlfChecksum && crlfChecksum !== checksum) {
+            await tx`UPDATE schema_migrations SET checksum = ${checksum} WHERE name = ${name}`;
+          } else if (existing.checksum !== checksum) throw new Error(`Applied migration was modified: ${name}`);
           continue;
         }
         await tx.unsafe(source);
