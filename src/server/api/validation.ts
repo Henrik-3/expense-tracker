@@ -16,6 +16,7 @@ export const statsQuerySchema = z.object({
   categoryId: uuidSchema.optional(),
   brand: z.string().trim().min(1).max(200).optional(),
   manufacturer: z.string().trim().min(1).max(200).optional(),
+  paidById: z.union([uuidSchema, z.literal("none")]).optional(),
   includeNeedsReview: z.enum(["true", "false"]).optional().transform((value) => value === "true"),
 }).refine((value) => !value.from || !value.to || value.from <= value.to, "from must not exceed to");
 

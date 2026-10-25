@@ -7,6 +7,12 @@ export const categories = pgTable("categories", {
   archived: boolean("archived").notNull().default(false),
 });
 
+export const people = pgTable("people", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  archived: boolean("archived").notNull().default(false),
+});
+
 export const merchantRules = pgTable("merchant_rules", {
   id: uuid("id").primaryKey().defaultRandom(),
   matchName: text("match_name").notNull(),
@@ -23,6 +29,7 @@ export const receipts = pgTable("receipts", {
   currency: text("currency"),
   total: numeric("total", { precision: 14, scale: 4 }),
   notes: text("notes").notNull().default(""),
+  paidById: uuid("paid_by_id").references(() => people.id, { onDelete: "set null" }),
   warnings: jsonb("warnings").$type<string[]>().notNull().default([]),
   error: text("error"),
   revision: integer("revision").notNull().default(0),
@@ -32,7 +39,7 @@ export const receipts = pgTable("receipts", {
   imageSha256: text("image_sha256").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [index("receipts_purchase_idx").on(t.purchasedAt), index("receipts_status_idx").on(t.status)]);
+}, (t) => [index("receipts_purchase_idx").on(t.purchasedAt), index("receipts_status_idx").on(t.status), index("receipts_paid_by_idx").on(t.paidById)]);
 
 export const receiptItems = pgTable("receipt_items", {
   id: uuid("id").primaryKey().defaultRandom(),

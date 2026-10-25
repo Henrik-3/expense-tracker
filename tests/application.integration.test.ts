@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import { createDatabase } from "../src/server/db";
 import { migrate } from "../src/server/db/migrate";
-import { categories, jobs, receipts, merchantRules, extractionRuns, receiptItems, receiptAdjustments } from "../src/server/db/schema";
+import { categories, people, jobs, receipts, merchantRules, extractionRuns, receiptItems, receiptAdjustments } from "../src/server/db/schema";
 import { loadConfig } from "../src/server/config";
 import { createServer } from "../src/server/server";
 import { processOneJob } from "../src/server/worker";
@@ -20,6 +20,7 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
   let uploadDir: string;
   const receiptIds: string[] = [];
   const categoryIds: string[] = [];
+  const personIds: string[] = [];
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j0WQAAAAASUVORK5CYII=", "base64");
 
   beforeAll(async () => {
@@ -41,6 +42,7 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
     if (database) {
       if (receiptIds.length) await database.db.delete(receipts).where(inArray(receipts.id, receiptIds));
       if (categoryIds.length) await database.db.delete(categories).where(inArray(categories.id, categoryIds));
+      if (personIds.length) await database.db.delete(people).where(inArray(people.id, personIds));
       await database.sql.end();
     }
     if (uploadDir) await rm(uploadDir, { recursive: true, force: true });
@@ -67,6 +69,7 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
       currency: receipt.currency,
       total: receipt.total,
       notes: receipt.notes,
+      paidById: receipt.paidById,
       items: receipt.items,
       adjustments: receipt.adjustments,
     };
@@ -193,6 +196,20 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
     expect((await getReceipt(ids[0]!)).reviewed).toBe(true);
     expect((await getReceipt(ids[1]!)).reviewed).toBe(false);
     expect((await request("/api/receipts?reviewed=yes")).status).toBe(400);
+  });
+
+  test("receipt list sorts by purchase date before upload date", async () => {
+    const ids = [randomUUID(), randomUUID(), randomUUID()];
+    receiptIds.push(...ids);
+    await database.db.insert(receipts).values([
+      { id: ids[0]!, status: "ready" as const, purchasedAt: "2099-01-01", createdAt: new Date("2099-01-05T00:00:00Z"), imagePath: `${ids[0]}.png`, imageMime: "image/png", imageSha256: ids[0]!, originalFilename: "receipt.png" },
+      { id: ids[1]!, status: "ready" as const, purchasedAt: "2099-01-10", createdAt: new Date("2099-01-02T00:00:00Z"), imagePath: `${ids[1]}.png`, imageMime: "image/png", imageSha256: ids[1]!, originalFilename: "receipt.png" },
+      { id: ids[2]!, status: "ready" as const, createdAt: new Date("2099-01-03T00:00:00Z"), imagePath: `${ids[2]}.png`, imageMime: "image/png", imageSha256: ids[2]!, originalFilename: "receipt.png" },
+    ]);
+    const listed = await (await request("/api/receipts?limit=100")).json() as ReceiptListResponse;
+    const positions = ids.map((id) => listed.receipts.findIndex((receipt) => receipt.id === id));
+    expect(positions[1]!).toBeLessThan(positions[2]!); // latest purchase date first
+    expect(positions[2]!).toBeLessThan(positions[0]!); // dated receipt sorts by purchase date, not upload date
   });
 
   test("review actions validate bodies, identifiers, and missing receipts", async () => {
@@ -468,6 +485,50 @@ describe.skipIf(!url)("application with PostgreSQL", () => {
     expect((await retried.json()).receipt.revision).toBe(failed.revision + 1);
     await processOneJob(database.db, config, detectionFetch);
     expect((await getReceipt(receiptId)).status).toBe("ready");
+  });
+
+  test("saving a receipt as ready also marks it reviewed", async () => {
+    const receiptId = randomUUID();
+    receiptIds.push(receiptId);
+    await upload(receiptId);
+    await database.db.update(receipts).set({ status: "needs_review" }).where(eq(receipts.id, receiptId));
+    const current = await getReceipt(receiptId);
+    expect(current.reviewed).toBe(false);
+    const ready = await patch(receiptId, { ...update(current), merchantName: "Review shop", purchasedAt: "2026-06-01", currency: "EUR", total: "1.00", items: [{ description: "BREAD", productName: "Bread", quantity: "1", unit: null, unitPrice: "1.00", lineTotal: "1.00", categoryId: null, brand: null, manufacturer: null }] });
+    expect(ready.status).toBe(200);
+    expect((await ready.json()).receipt.reviewed).toBe(true);
+  });
+
+  test("people can be managed and recorded as the payer of a receipt", async () => {
+    const post = (body: unknown) => request("/api/people", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const name = `Payer ${randomUUID()}`;
+    const created = await post({ name });
+    expect(created.status).toBe(201);
+    const { person } = await created.json();
+    personIds.push(person.id);
+    expect(person).toMatchObject({ name, archived: false });
+    expect((await post({ name })).status).toBe(409);
+    expect((await post({ name: " " })).status).toBe(400);
+    const listed = await (await request("/api/people")).json();
+    expect(listed.people.some((p: { id: string }) => p.id === person.id)).toBe(true);
+
+    const receiptId = randomUUID();
+    receiptIds.push(receiptId);
+    await upload(receiptId);
+    await database.db.update(receipts).set({ status: "needs_review" }).where(eq(receipts.id, receiptId));
+    const current = await getReceipt(receiptId);
+    expect(current.paidById).toBeNull();
+    expect((await patch(receiptId, { ...update(current), status: "needs_review", paidById: randomUUID() })).status).toBe(400);
+    const saved = await patch(receiptId, { ...update(current), status: "needs_review", paidById: person.id });
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).receipt.paidById).toBe(person.id);
+
+    // Archiving keeps the assignment.
+    const archived = await request(`/api/people/${person.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, archived: true }) });
+    expect((await archived.json()).person.archived).toBe(true);
+    expect((await getReceipt(receiptId)).paidById).toBe(person.id);
+    const list = await (await request("/api/receipts?limit=100")).json() as ReceiptListResponse;
+    expect(list.receipts.find((r) => r.id === receiptId)?.paidById).toBe(person.id);
   });
 
   test("receipt actions validate revisions and missing IDs", async () => {

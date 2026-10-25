@@ -21,7 +21,7 @@ function fixture(): ReceiptDetail {
   return {
     id: receiptId, merchantName: "REWE ihr markt", merchantGroup: "REWE",
     purchasedAt: "2026-06-01", currency: "EUR", total: "25.00", notes: "",
-    status: "ready", revision: 0, warnings: [], error: null, reviewed: false,
+    status: "ready", revision: 0, warnings: [], error: null, reviewed: false, paidById: null,
     createdAt: "2026-06-01T12:00:00Z", updatedAt: "2026-06-01T12:00:00Z",
     imageUrl: `/api/receipts/${receiptId}/image`, adjustments: [],
     items: Array.from({ length: 25 }, (_, index) => ({
@@ -36,7 +36,7 @@ const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQ
 const receipt: ReceiptDetail = {
   id: "11111111-1111-4111-8111-111111111111", merchantName: "The Daily Coffee", merchantGroup: "The Daily Coffee",
   purchasedAt: "2026-06-01", currency: "EUR", total: "7.50", notes: "",
-  status: "ready", warnings: [], error: null, revision: 1, reviewed: false,
+  status: "ready", warnings: [], error: null, revision: 1, reviewed: false, paidById: null,
   createdAt: "2026-06-01T10:00:00Z", updatedAt: "2026-06-01T10:00:00Z",
   imageUrl: "/api/receipts/example/image",
   items: [{ id: "item-1", description: "Coffee and croissant", productName: null,
@@ -54,7 +54,7 @@ const stats: StatsResponse = {
   excludedReceipts: 0,
   currencies: [{ currency: "EUR", receiptCount: 1, total: "7.50", basis: "receipts",
     timeline: [{ name: "2026-06", total: "7.50" }], merchants: [{ name: "The Daily Coffee", total: "7.50" }],
-    categories: [{ name: "Food & drink", total: "7.50" }], brands: [], manufacturers: [] }],
+    payers: [], categories: [{ name: "Food & drink", total: "7.50" }], brands: [], manufacturers: [] }],
 };
 async function noOverflow(page: Page) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -87,6 +87,7 @@ try {
       const respond = (data: unknown, status = 200) => route.fulfill({ status, json: data });
       if (path === "/api/health") return respond({ aiConfigured: true, status: "ok" });
       if (path === "/api/categories") return respond({ categories });
+      if (path === "/api/people") return respond({ people: [] });
       if (path === `/api/categories/${categoryId}`) {
         categories = [{ ...categories[0]!, ...route.request().postDataJSON() }];
         return respond({ category: categories[0] });
@@ -375,6 +376,7 @@ try {
       const respond = (data: unknown, status = 200) => route.fulfill({ status, json: data });
       if (path === "/api/health") return respond({ aiConfigured: true, status: "ok" });
       if (path === "/api/categories") return respond({ categories: [] });
+      if (path === "/api/people") return respond({ people: [] });
       if (path === "/api/receipts") return respond({ receipts: deleted ? [second] : [first, second], total: deleted ? 1 : 2 });
       if (path.endsWith("/image")) return route.fulfill({ contentType: "image/png", body: image });
       if (path === `/api/receipts/${second.id}`) return respond({ receipt: second });
@@ -444,6 +446,7 @@ try {
       if (path === "/api/health") data = { status: "ok", aiConfigured: true };
       else if (path === "/api/categories") data = { categories: [{ id: "22222222-2222-4222-8222-222222222222", name: "Food & drink", archived: false }] };
       else if (path === "/api/merchant-rules") data = { rules: [] };
+      else if (path === "/api/people") data = { people: [] };
       else if (path === "/api/stats") data = stats;
       else if (path === "/api/receipts" && method === "GET") data = receipts;
       else if (path.startsWith("/api/receipts")) data = { receipt };

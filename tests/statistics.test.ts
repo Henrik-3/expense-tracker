@@ -4,7 +4,7 @@ import { aggregateStatistics } from "../src/server/services/statistics";
 
 const receipt = (changes: Partial<ReceiptDetail> = {}): ReceiptDetail => ({
   id: "test", status: "ready", merchantName: "Shop", purchasedAt: "2025-01-05", currency: "EUR", total: "0.3", notes: "", warnings: [], error: null, revision: 0,
-  createdAt: "", updatedAt: "", imageUrl: "", adjustments: [], merchantGroup: null, reviewed: false,
+  createdAt: "", updatedAt: "", imageUrl: "", adjustments: [], merchantGroup: null, reviewed: false, paidById: null,
   items: [{ id: "item", description: "Food", productName: null, quantity: "1", unit: null, unitPrice: "0.4", lineTotal: "0.4", categoryId: "food", brand: "Brand", manufacturer: "Maker" }], ...changes,
 });
 describe("exact statistics", () => {
@@ -25,6 +25,16 @@ describe("exact statistics", () => {
     expect(result.currencies[0]!.total).toBe("0.3");
     expect(result.currencies[0]!.categories[0]!.total).toBe("0.8");
     expect(result.currencies[1]!.total).toBe("2");
+  });
+  test("totals break down by payer and filter by payer or missing payer", () => {
+    const rows = [receipt({ paidById: "ann", total: "0.1" }), receipt({ paidById: "ann", total: "0.2" }), receipt({ paidById: "bob", total: "1" }), receipt({ total: "2" })];
+    const people = new Map([["ann", "Ann"], ["bob", "Bob"]]);
+    expect(aggregateStatistics(rows, new Map(), {}, people).currencies[0]!.payers).toEqual([
+      { name: "Ann", total: "0.3" }, { name: "Bob", total: "1" }, { name: "Not set", total: "2" },
+    ]);
+    expect(aggregateStatistics(rows, new Map(), { paidById: "ann" }, people).currencies[0]!.total).toBe("0.3");
+    expect(aggregateStatistics(rows, new Map(), { paidById: "none" }, people).currencies[0]!.total).toBe("2");
+    expect(aggregateStatistics(rows, new Map(), { paidById: "ann", brand: "brand" }, people).currencies[0]!.payers).toEqual([{ name: "Ann", total: "0.8" }]);
   });
   test("item filters change main basis without allocating discounts", () => {
     const result = aggregateStatistics([receipt()], new Map(), { brand: "brand", manufacturer: "MAKER", categoryId: "food" });

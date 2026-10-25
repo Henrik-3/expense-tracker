@@ -1,14 +1,14 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
-import { and, eq, desc, count, gte, lte, inArray } from "drizzle-orm";
+import { and, eq, desc, count, gte, lte, inArray, sql } from "drizzle-orm";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdir, unlink, readFile } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import type { Database } from "./db";
 import type { Config } from "./config";
-import { receipts, receiptItems, receiptAdjustments, jobs, categories, merchantRules } from "./db/schema";
-import { receiptUpdateSchema, receiptRevisionSchema, receiptReviewSchema, categoryInputSchema, merchantRuleInputSchema, type ReceiptDetail } from "../shared/contracts";
+import { receipts, receiptItems, receiptAdjustments, jobs, categories, people, merchantRules } from "./db/schema";
+import { receiptUpdateSchema, receiptRevisionSchema, receiptReviewSchema, categoryInputSchema, personInputSchema, merchantRuleInputSchema, type ReceiptDetail } from "../shared/contracts";
 import { merchantResolver } from "./services/merchant-grouping";
 import { assessExtraction } from "./services/reconciliation";
 import { aggregateStatistics } from "./services/statistics";
@@ -20,7 +20,7 @@ type Reader = Pick<Database, "select">;
 function fail(status: 400 | 404 | 409 | 413 | 415, message: string): never { throw new HTTPException(status, { message }); }
 function id(value: string) { const parsed = uuidSchema.safeParse(value); if (!parsed.success) fail(400, "Invalid UUID"); return parsed.data; }
 function summary(row: typeof receipts.$inferSelect, resolveMerchant: ReturnType<typeof merchantResolver>) {
-  return { id: row.id, status: row.status, reviewed: row.reviewed, merchantName: row.merchantName, merchantGroup: resolveMerchant(row.merchantName), purchasedAt: row.purchasedAt, currency: row.currency, total: row.total, notes: row.notes, warnings: row.warnings, error: row.error, revision: row.revision, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
+  return { id: row.id, status: row.status, reviewed: row.reviewed, merchantName: row.merchantName, merchantGroup: resolveMerchant(row.merchantName), purchasedAt: row.purchasedAt, currency: row.currency, total: row.total, notes: row.notes, paidById: row.paidById, warnings: row.warnings, error: row.error, revision: row.revision, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
 }
 async function detail(db: Reader, receiptId: string): Promise<ReceiptDetail> {
   const resolveMerchant = merchantResolver(await db.select().from(merchantRules));
@@ -49,7 +49,8 @@ export function createApp(db: Database, config: Config) {
     return db.transaction(async (tx) => {
       const resolveMerchant = merchantResolver(await tx.select().from(merchantRules));
       const filter = query.data.reviewed === undefined ? undefined : eq(receipts.reviewed, query.data.reviewed);
-      const rows = await tx.select().from(receipts).where(filter).orderBy(desc(receipts.createdAt), receipts.id).limit(query.data.limit).offset(query.data.offset);
+      // sort by purchase date, falling back to upload time for receipts without one
+      const rows = await tx.select().from(receipts).where(filter).orderBy(desc(sql`coalesce(${receipts.purchasedAt}::timestamp, ${receipts.createdAt})`), receipts.id).limit(query.data.limit).offset(query.data.offset);
       const [total] = await tx.select({ value: count() }).from(receipts).where(filter);
       return c.json({ receipts: rows.map((row) => summary(row, resolveMerchant)), total: total!.value });
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
@@ -118,8 +119,9 @@ export function createApp(db: Database, config: Config) {
         const found = await tx.select().from(categories).where(inArray(categories.id, categoryIds));
         if (found.length !== categoryIds.length) fail(400, "Unknown category");
       }
+      if (input.paidById && !(await tx.select().from(people).where(eq(people.id, input.paidById))).length) fail(400, "Unknown person");
       const { items, adjustments, revision, ...fields } = input;
-      await tx.update(receipts).set({ ...fields, revision: revision + 1, warnings: assessment.warnings, error: null, updatedAt: new Date() }).where(eq(receipts.id, receiptId));
+      await tx.update(receipts).set({ ...fields, ...(input.status === "ready" ? { reviewed: true } : {}), revision: revision + 1, warnings: assessment.warnings, error: null, updatedAt: new Date() }).where(eq(receipts.id, receiptId));
       await tx.delete(receiptItems).where(eq(receiptItems.receiptId, receiptId));
       await tx.delete(receiptAdjustments).where(eq(receiptAdjustments.receiptId, receiptId));
       if (items.length) await tx.insert(receiptItems).values(items.map((item, position) => ({ ...item, position, receiptId })));
@@ -219,19 +221,23 @@ export function createApp(db: Database, config: Config) {
     if (!rows.length) fail(404, "Merchant rule not found");
     return c.body(null, 204);
   });
-  for (const method of ["post", "patch"] as const) app[method](method === "post" ? "/api/categories" : "/api/categories/:id", async (c) => {
-    const parsed = categoryInputSchema.safeParse(await json(c));
-    if (!parsed.success) fail(400, "Invalid category");
-    try {
-      const rows = method === "post" ? await db.insert(categories).values(parsed.data).returning() : await db.update(categories).set(parsed.data).where(eq(categories.id, id(c.req.param("id")!))).returning();
-      if (!rows[0]) fail(404, "Category not found");
-      return c.json({ category: rows[0] }, method === "post" ? 201 : 200);
-    } catch (error) {
-      const cause = error as { code?: string; cause?: { code?: string } };
-      if (cause.code === "23505" || cause.cause?.code === "23505") fail(409, "Category name already exists");
-      throw error;
-    }
-  });
+  app.get("/api/people", async (c) => c.json({ people: await db.select().from(people).orderBy(people.name) }));
+  // Categories and people share the same name + archived management.
+  for (const [path, table, schema, key, label] of [["categories", categories, categoryInputSchema, "category", "Category"], ["people", people, personInputSchema, "person", "Person"]] as const) {
+    for (const method of ["post", "patch"] as const) app[method](method === "post" ? `/api/${path}` : `/api/${path}/:id`, async (c) => {
+      const parsed = schema.safeParse(await json(c));
+      if (!parsed.success) fail(400, `Invalid ${key}`);
+      try {
+        const rows = method === "post" ? await db.insert(table).values(parsed.data).returning() : await db.update(table).set(parsed.data).where(eq(table.id, id(c.req.param("id")!))).returning();
+        if (!rows[0]) fail(404, `${label} not found`);
+        return c.json({ [key]: rows[0] }, method === "post" ? 201 : 200);
+      } catch (error) {
+        const cause = error as { code?: string; cause?: { code?: string } };
+        if (cause.code === "23505" || cause.cause?.code === "23505") fail(409, `${label} name already exists`);
+        throw error;
+      }
+    });
+  }
   app.get("/api/stats", async (c) => {
     const parsed = statsQuerySchema.safeParse(c.req.query());
     if (!parsed.success) fail(400, "Invalid statistics filters");
@@ -256,7 +262,8 @@ export function createApp(db: Database, config: Config) {
       const resolveMerchant = merchantResolver(await tx.select().from(merchantRules));
       const details: ReceiptDetail[] = rows.map((row) => ({ ...summary(row, resolveMerchant), imageUrl: "", items: itemsByReceipt.get(row.id) ?? [], adjustments: [] }));
       const names = new Map((await tx.select().from(categories)).map((category) => [category.id, category.name]));
-      return c.json(aggregateStatistics(details, names, parsed.data));
+      const payers = new Map((await tx.select().from(people)).map((person) => [person.id, person.name]));
+      return c.json(aggregateStatistics(details, names, parsed.data, payers));
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
   });
   app.notFound((c) => c.json({ error: "Not found" }, 404));

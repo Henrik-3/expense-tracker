@@ -34,6 +34,7 @@ export const receiptFieldsSchema = z.object({
   currency: z.string().regex(/^[A-Z]{3}$/).nullable(),
   total: decimalSchema.nullable(),
   notes: z.string().max(4000),
+  paidById: z.uuid().nullable(),
 });
 export const receiptUpdateSchema = receiptFieldsSchema.extend({
   revision: z.number().int().nonnegative(),
@@ -85,6 +86,12 @@ export const categoryInputSchema = z.object({
   name: z.string().trim().min(1).max(100),
   archived: z.boolean().optional(),
 });
+export interface Person {
+  id: string;
+  name: string;
+  archived: boolean;
+}
+export const personInputSchema = categoryInputSchema;
 
 export const merchantRuleInputSchema = z.object({
   matchName: z.string().transform((value) => value.trim().replace(/\s+/g, " ")).pipe(z.string().min(1).max(200)),
@@ -94,7 +101,7 @@ export const merchantRuleInputSchema = z.object({
 export type MerchantRule = z.infer<typeof merchantRuleInputSchema> & { id: string };
 
 // This is the validated application shape, not a provider-specific wire schema.
-export const extractionSchema = receiptFieldsSchema.omit({ notes: true }).extend({
+export const extractionSchema = receiptFieldsSchema.omit({ notes: true, paidById: true }).extend({
   items: z.array(itemInputSchema).max(500),
   adjustments: z.array(adjustmentInputSchema).max(100),
   warnings: z.array(z.string().max(1000)).max(100),
@@ -112,6 +119,7 @@ export interface CurrencyStats {
   basis: "receipts" | "items";
   timeline: Breakdown[];
   merchants: Breakdown[];
+  payers: Breakdown[];
   categories: Breakdown[];
   brands: Breakdown[];
   manufacturers: Breakdown[];
@@ -142,6 +150,11 @@ export interface StatsResponse {
 // GET /api/categories -> { categories: Category[] } (includes archived)
 // POST /api/categories (categoryInputSchema) -> { category: Category }
 // PATCH /api/categories/:id (categoryInputSchema) -> { category: Category }
+// GET /api/people -> { people: Person[] } (includes archived)
+// POST /api/people (personInputSchema) -> { person: Person }
+// PATCH /api/people/:id (personInputSchema) -> { person: Person }
+// Receipts carry paidById (a person, or null). Archived people stay assigned
+// to existing receipts; redetection keeps paidById.
 // GET /api/merchant-rules -> { rules: MerchantRule[] }
 // POST /api/merchant-rules (merchantRuleInputSchema) -> { rule: MerchantRule }
 // PATCH /api/merchant-rules/:id (merchantRuleInputSchema, all fields required) -> { rule: MerchantRule }
@@ -149,5 +162,6 @@ export interface StatsResponse {
 // Receipt summaries/details expose merchantGroup (null when no rule matches);
 // merchantName remains the printed name. Merchant stats use group or printed name.
 // GET /api/stats?from=YYYY-MM-DD&to=YYYY-MM-DD&groupBy=day|week|month
-//   &merchant=...&categoryId=...&brand=...&manufacturer=...&includeNeedsReview=true -> StatsResponse
+//   &merchant=...&categoryId=...&brand=...&manufacturer=...&paidById=<uuid>|none&includeNeedsReview=true -> StatsResponse
+// payers breaks totals down by who paid ("Not set" when no payer), on the same basis as merchants.
 // Errors: { error: string }, with appropriate 4xx/5xx HTTP status.

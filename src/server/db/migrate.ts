@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { loadConfig } from "../config";
 
-const migrations = ["001_initial.sql", "002_merchant_rules.sql", "003_receipt_review.sql"];
+const migrations = ["001_initial.sql", "002_merchant_rules.sql", "003_receipt_review.sql", "004_people.sql"];
 
 export async function migrate(databaseUrl: string) {
   const sql = postgres(databaseUrl, { max: 1 });

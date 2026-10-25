@@ -16,7 +16,7 @@ describe("API boundary validation", () => {
     expect(receiptListQuerySchema.safeParse({ reviewed: "false", offset: "-1" }).success).toBe(false);
   });
   test("statistics rejects invalid dates, ranges, identifiers and booleans", () => {
-    for (const input of [{ from: "2025-02-30" }, { from: "2025-02-02", to: "2025-01-01" }, { categoryId: "../x" }, { includeNeedsReview: "yes" }, { groupBy: "year" }]) expect(statsQuerySchema.safeParse(input).success).toBe(false);
+    for (const input of [{ from: "2025-02-30" }, { from: "2025-02-02", to: "2025-01-01" }, { categoryId: "../x" }, { paidById: "nobody" }, { includeNeedsReview: "yes" }, { groupBy: "year" }]) expect(statsQuerySchema.safeParse(input).success).toBe(false);
     expect(statsQuerySchema.parse({ includeNeedsReview: "false" }).includeNeedsReview).toBe(false);
   });
   test("image signatures are required", () => {
